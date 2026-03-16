@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Community and questions
+    url: https://github.com/velr-ai/velr/discussions
+    about: Ask questions about installing Velr, using the APIs, writing queries, and working through examples.

@@ -1,0 +1,69 @@
+name: Feature request
+description: Suggest a feature or improvement for Velr
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing an idea.
+
+        Please use Discussions for early brainstorming or open-ended product discussion.
+        Use this form for concrete feature requests you want tracked.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which area does this request relate to?
+      options:
+        - Rust crate
+        - Python package
+        - Documentation
+        - Examples
+        - Website
+        - Query language
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: Describe the use case, pain point, or missing capability.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: Describe the feature or improvement you would like to see.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      placeholder: Describe any workarounds or alternatives you considered.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      placeholder: Add examples, links, sample queries, or background.
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions first
+          required: true

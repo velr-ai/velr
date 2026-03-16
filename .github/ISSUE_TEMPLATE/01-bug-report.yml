@@ -1,0 +1,81 @@
+name: Bug report
+description: Report a bug in Velr
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        Please use Discussions for general questions or usage help.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Surface
+      description: Which part of Velr is affected?
+      options:
+        - Rust crate
+        - Python package
+        - Documentation
+        - Examples
+        - Website
+        - Other / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: What Velr version are you using?
+      placeholder: e.g. 0.1.0
+    validations:
+      required: false
+
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS, architecture, Python/Rust version, or anything relevant
+      placeholder: e.g. macOS 15 arm64, Python 3.12
+    validations:
+      required: false
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen.
+      placeholder: Tell us what you saw and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Share the smallest reproduction you can.
+      placeholder: Steps, query, code snippet, or sample input
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant output
+      description: Paste any relevant logs, errors, or trace output.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and discussions first
+          required: true
