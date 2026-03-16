@@ -1,0 +1,23 @@
+# OS-generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Temporary files / directories
+.tmp/
+temp/
+tmp/
+
+# Archive / backup artifacts
+*.bak
+*.orig
