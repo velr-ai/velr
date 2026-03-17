@@ -72,6 +72,7 @@ Velr is designed for applications that need graph queries without running a sepa
 It is built for:
 
 - embedded applications
+- physical ai
 - local-first software
 - edge systems
 - agent memory
