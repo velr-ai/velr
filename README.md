@@ -4,55 +4,18 @@ Velr is an embedded property-graph database from Velr.ai, written in Rust, built
 
 It runs in-process, persists to a standard SQLite database file, and is designed for local, embedded, and edge use cases.
 
-> [!NOTE]
-> Velr is currently in **public alpha**.
+This repository is the **public entry point** for Velr: the best place to discover the project, find the main public resources, ask questions, report bugs, and explore how to get started.
 
-> [!NOTE]
-> **Velr 1.0 is focused on strong openCypher compatibility.**  
-> **Vector search**, **time-series**, and **federation** are planned as post-1.0 capabilities.
+We’d love to have you join the Velr community.
 
-## What this repository is
-
-This repository is the **public hub** for Velr.
-
-Use it for:
-
-- **community discussions and questions**
-- **bug reports and feature requests**
-- finding the main public Velr resources
-
-This repository is the public entry point for Velr, with links to the main public resources, packages, examples, and documentation.
-
-## Getting started
-
-Velr is available today as a **Rust crate** and a **Python package**.
-
-### Rust
-
-- [velr on crates.io](https://crates.io/crates/velr)
-- [velr API docs on docs.rs](https://docs.rs/velr/latest/velr/)
-- [velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
-- [velr-rust-examples](https://github.com/velr-ai/velr-rust-examples)
-
-### Python
-
-- [velr on PyPI](https://pypi.org/project/velr/)
-- [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
-
-### Website
-
-- [velr.ai](https://velr.ai/)
-
-## Community
-
-- **Community and questions:** GitHub Discussions
-- **Bug reports and feature requests:** GitHub Issues
-
-## Public alpha status
+## Release status
 
 Velr is currently in **public alpha** and is released under a **Free Binary Redistribution License**.
 
-The API and query support are still evolving, but Velr is already usable for many real workflows and application prototypes.
+- The API and query support are still evolving.
+- openCypher coverage is already substantial, but some features are still missing.
+
+Velr is already usable for real workflows and representative use cases, but rough edges remain and the API is not yet stable.
 
 ## Roadmap direction
 
@@ -63,6 +26,37 @@ After 1.0, planned capabilities include:
 - vector search
 - time-series
 - federation
+
+## What you can do here
+
+This repository is the **public hub** for Velr and the best place to get started.
+
+Here you can:
+
+- **join community discussions and ask questions** in [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
+- **report bugs and request features** in [GitHub Issues](https://github.com/velr-ai/velr/issues)
+- **find the main public Velr resources**, including packages and documentation
+
+We’d love to hear what you’re building with Velr, answer questions, and get feedback as the project evolves.
+
+## Getting started
+
+Velr is available today as a **Rust crate** and a **Python package**.
+
+### Rust
+
+- [velr on crates.io](https://crates.io/crates/velr)
+- [velr API docs on docs.rs](https://docs.rs/velr/latest/velr/)
+- [velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
+
+### Python
+
+- [velr on PyPI](https://pypi.org/project/velr/)
+- [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
+
+### Website
+
+- [velr.ai](https://velr.ai/)
 
 ## Example repositories
 
