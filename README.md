@@ -1,83 +1,157 @@
 # Velr
 
-Velr is an embedded property-graph database from Velr.ai, written in Rust, built on top of SQLite, and queried using **openCypher**.
+## What This Page Is
 
-It runs in-process, persists to a standard SQLite database file, and is designed for local, embedded, and edge use cases.
+This repository is the public landing page for the Velr project.
 
-This repository is the **public entry point** for Velr: the best place to discover the project, find the main public resources, ask questions, report bugs, and explore how to get started.
+Start here if you want to understand what Velr is, what is available today,
+where the public packages live, how to try it, and where to ask questions or
+report issues. This page is intentionally an umbrella page, not a full API
+reference. For driver-level details, follow the Rust and Python links below.
 
-We’d love to have you join the Velr community.
+We would love to hear what you are building with Velr and what would make it
+more useful.
 
-## Release status
+## What Velr Is
 
-Velr is currently in **public alpha** and is released under a **Free Binary Redistribution License**.
+Velr is an embedded property-graph database from Velr.ai, implemented in Rust,
+stored in a standard SQLite database file, and queried with **openCypher**.
 
-- The API and query support are still evolving.
-- openCypher coverage is already substantial, but some features are still missing.
+It runs in-process instead of as a separate database server. That makes it a
+good fit for applications that need graph queries close to their data:
+local-first software, edge and physical AI systems, agent memory, data products,
+and modern Rust and Python workflows.
 
-Velr is already usable for real workflows and representative use cases, but rough edges remain and the API is not yet stable.
+Velr is available today through public Rust and Python drivers. Each driver
+wraps a bundled native runtime implemented in Rust, so applications can use
+Velr without running a separate service.
 
-## Roadmap direction
+## Public Resources
 
-Velr 1.0 is focused on delivering strong **openCypher compatibility** for an embedded, SQLite-based graph database.
-
-After 1.0, planned capabilities include:
-
-- vector search
-- time-series
-- federation
-
-## What you can do here
-
-This repository is the **public hub** for Velr and the best place to get started.
-
-Here you can:
-
-- **join community discussions and ask questions** in [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
-- **report bugs and request features** in [GitHub Issues](https://github.com/velr-ai/velr/issues)
-- **find the main public Velr resources**, including packages and documentation
-
-We’d love to hear what you’re building with Velr, answer questions, and get feedback as the project evolves.
-
-## Getting started
-
-Velr is available today as a **Rust crate** and a **Python package**.
+- Website: [velr.ai](https://velr.ai/)
+- Community questions: [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
+- Bug reports and feature requests: [GitHub Issues](https://github.com/velr-ai/velr/issues)
 
 ### Rust
 
-- [velr on crates.io](https://crates.io/crates/velr)
-- [velr API docs on docs.rs](https://docs.rs/velr/latest/velr/)
-- [velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
+- Crate: [velr on crates.io](https://crates.io/crates/velr)
+- API docs: [velr on docs.rs](https://docs.rs/velr/latest/velr/)
+- Driver repository: [velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
+- Examples: [velr-rust-examples](https://github.com/velr-ai/velr-rust-examples)
 
 ### Python
 
-- [velr on PyPI](https://pypi.org/project/velr/)
-- [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
+- Package: [velr on PyPI](https://pypi.org/project/velr/)
+- Examples: [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
 
-### Website
+## Status
 
-- [velr.ai](https://velr.ai/)
+Velr is currently in **public alpha**.
 
-## Example repositories
+- The Rust and Python APIs are usable, but still evolving.
+- The current public drivers are in the `0.2.x` series.
+- Velr supports openCypher and passes all positive openCypher TCK tests. Exact
+  error semantics are not guaranteed to match other openCypher implementations.
+- Fulltext search and vector search are available today through Cypher DDL and
+  `CALL` syntax. Their APIs may still evolve while Velr remains alpha.
 
-If you want the fastest path to working code, start here:
+Velr is already useful for real workflows and representative use cases, but you
+should expect rough edges while the project moves toward a stable 1.0 release.
 
-- [velr-rust-examples](https://github.com/velr-ai/velr-rust-examples) — end-to-end Rust examples and common workflows
-- [velr-python-examples](https://github.com/velr-ai/velr-python-examples) — end-to-end Python examples and common workflows
+## Feature Snapshot
 
-## Why Velr
+- Embedded graph database runtime backed by SQLite
+- In-memory and file-backed databases
+- openCypher query execution
+- Rust and Python public drivers with bundled native runtimes
+- Query parameter binding in the public drivers
+- Transactions and savepoints
+- Read-only database opening for viewers, agents, and inspection tools
+- Explicit database migration support
+- Observed graph-shape introspection with `SHOW CURRENT GRAPH SHAPE`
+- Fulltext indexes with `CREATE FULLTEXT INDEX`
+- Vector indexes with `CREATE VECTOR INDEX` and application-provided embedders
+- Result streaming and bounded previews
+- Arrow IPC support, plus Python interop with PyArrow, pandas, and Polars
 
-Velr is designed for applications that need graph queries without running a separate database server.
+## Quickstart
 
-It is built for:
+Choose the driver that fits your application. The examples below create an
+in-memory graph, bind a parameter, and read one result.
 
-- embedded applications
-- physical ai
-- local-first software
-- edge systems
-- agent memory
-- modern Rust and Python workflows
+### Python
+
+Install the Python package from PyPI:
+
+```sh
+python -m pip install velr
+```
+
+Python 3.12 or newer is required.
+
+```python
+from velr.driver import Velr
+
+with Velr.open(None) as db:
+    db.run(
+        "CREATE (:Person {name: $name})",
+        params={"name": "Ada Lovelace"},
+    )
+
+    with db.exec_one("MATCH (p:Person) RETURN p.name AS name") as table:
+        rows = table.collect(lambda row: [cell.as_python() for cell in row])
+        print(rows)
+```
+
+Use `Velr.open("graph.db")` for a file-backed database.
+
+### Rust
+
+Add the Rust crate:
+
+```toml
+[dependencies]
+velr = "0.2"
+```
+
+```rust
+use velr::{CellRef, Velr};
+
+fn main() -> velr::Result<()> {
+    let db = Velr::open(None)?;
+
+    db.run_with_params(
+        "CREATE (:Person {name: $name})",
+        velr::params! { name: "Ada Lovelace" }?,
+    )?;
+
+    let mut table = db.exec_one("MATCH (p:Person) RETURN p.name AS name")?;
+    table.for_each_row(|row| {
+        if let CellRef::Text(name) = row[0] {
+            println!("{}", std::str::from_utf8(name).unwrap());
+        }
+        Ok(())
+    })?;
+
+    Ok(())
+}
+```
+
+Use `Velr::open(Some("graph.db"))` for a file-backed database.
+
+## Roadmap Direction
+
+The main path to Velr 1.0 is stabilization: clearer error behavior, stable
+public APIs, and better documentation.
+
+Vector search, fulltext search, graph-shape introspection, parameter binding,
+transactions, and data-frame/Arrow interop are already present and will continue
+to harden. Longer-term directions include time-series and federation.
 
 ## License
 
-Velr is currently distributed under a **Free Binary Redistribution License**.
+The public Rust and Python driver source packages are licensed under MIT. The
+bundled native runtime binaries may be used and freely redistributed in
+unmodified form under the Velr Free Binary Redistribution License
+(`LICENSE.runtime` in each package). See the package license files for the full
+terms.
