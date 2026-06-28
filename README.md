@@ -7,7 +7,7 @@ This repository is the public landing page for the Velr project.
 Start here if you want to understand what Velr is, what is available today,
 where the public packages live, how to try it, and where to ask questions or
 report issues. This page is intentionally an umbrella page, not a full API
-reference. For driver-level details, follow the Rust and Python links below.
+reference. For driver-level details, follow the language-specific links below.
 
 We would love to hear what you are building with Velr and what would make it
 more useful.
@@ -20,11 +20,11 @@ stored in a standard SQLite database file, and queried with **openCypher**.
 It runs in-process instead of as a separate database server. That makes it a
 good fit for applications that need graph queries close to their data:
 local-first software, edge and physical AI systems, agent memory, data products,
-and modern Rust and Python workflows.
+and modern Rust, Python, JavaScript, and TypeScript workflows.
 
-Velr is available today through public Rust and Python drivers. Each driver
-wraps a bundled native runtime implemented in Rust, so applications can use
-Velr without running a separate service.
+Velr is available today through public Rust, Python, JavaScript, and TypeScript
+drivers. Each driver wraps a bundled native runtime implemented in Rust, so
+applications can use Velr without running a separate service.
 
 ## Public Resources
 
@@ -44,11 +44,17 @@ Velr without running a separate service.
 - Package: [velr on PyPI](https://pypi.org/project/velr/)
 - Examples: [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
 
+### JavaScript / TypeScript
+
+- Package: [@velr-ai/velr on npm](https://www.npmjs.com/package/@velr-ai/velr)
+- JavaScript examples: [velr-javascript-examples](https://github.com/velr-ai/velr-javascript-examples)
+- TypeScript examples: [velr-typescript-examples](https://github.com/velr-ai/velr-typescript-examples)
+
 ## Status
 
 Velr is currently in **public alpha**.
 
-- The Rust and Python APIs are usable, but still evolving.
+- The public driver APIs are usable, but still evolving.
 - The current public drivers are in the `0.2.x` series.
 - Velr supports openCypher and passes all positive openCypher TCK tests. Exact
   error semantics are not guaranteed to match other openCypher implementations.
@@ -63,7 +69,8 @@ should expect rough edges while the project moves toward a stable 1.0 release.
 - Embedded graph database runtime backed by SQLite
 - In-memory and file-backed databases
 - openCypher query execution
-- Rust and Python public drivers with bundled native runtimes
+- Rust, Python, JavaScript, and TypeScript public drivers with bundled native
+  runtimes
 - Query parameter binding in the public drivers
 - Transactions and savepoints
 - Read-only database opening for viewers, agents, and inspection tools
@@ -72,7 +79,8 @@ should expect rough edges while the project moves toward a stable 1.0 release.
 - Fulltext indexes with `CREATE FULLTEXT INDEX`
 - Vector indexes with `CREATE VECTOR INDEX` and application-provided embedders
 - Result streaming and bounded previews
-- Arrow IPC support, plus Python interop with PyArrow, pandas, and Polars
+- Arrow IPC support, including Python interop with PyArrow, pandas, and Polars
+  and JavaScript/TypeScript interop with Apache Arrow
 
 ## Quickstart
 
@@ -101,6 +109,37 @@ with Velr.open(None) as db:
     with db.exec_one("MATCH (p:Person) RETURN p.name AS name") as table:
         rows = table.collect(lambda row: [cell.as_python() for cell in row])
         print(rows)
+```
+
+Use `Velr.open("graph.db")` for a file-backed database.
+
+### JavaScript / TypeScript
+
+Install the Node.js package from npm:
+
+```sh
+npm install @velr-ai/velr
+```
+
+Node.js 22 or newer is required.
+
+```ts
+import { Velr } from "@velr-ai/velr";
+
+const db = Velr.open(null);
+try {
+  db.run("CREATE (:Person {name: $name})", {
+    params: { name: "Ada Lovelace" },
+  });
+
+  const rows = db.query(
+    "MATCH (p:Person) RETURN p.name AS name",
+    { int64: "number" }
+  );
+  console.log(rows);
+} finally {
+  db.close();
+}
 ```
 
 Use `Velr.open("graph.db")` for a file-backed database.
@@ -150,8 +189,8 @@ to harden. Longer-term directions include time-series and federation.
 
 ## License
 
-The public Rust and Python driver source packages are licensed under MIT. The
-bundled native runtime binaries may be used and freely redistributed in
-unmodified form under the Velr Free Binary Redistribution License
-(`LICENSE.runtime` in each package). See the package license files for the full
-terms.
+The public Rust, Python, JavaScript, and TypeScript driver source packages are
+licensed under MIT. The bundled native runtime binaries may be used and freely
+redistributed in unmodified form under the Velr Free Binary Redistribution
+License (`LICENSE.runtime` in each package). See the package license files for
+the full terms.
