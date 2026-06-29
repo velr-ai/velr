@@ -16,15 +16,17 @@ more useful.
 
 Velr is an embedded property-graph database from Velr.ai, implemented in Rust,
 stored in a standard SQLite database file, and queried with **openCypher**.
+It also supports full-text BM25 search and vector approximate nearest neighbor
+(ANN) search for retrieval-heavy graph applications.
 
 It runs in-process instead of as a separate database server. That makes it a
 good fit for applications that need graph queries close to their data:
 local-first software, edge and physical AI systems, agent memory, data products,
-and modern Rust, Python, JavaScript, and TypeScript workflows.
+and modern Rust, Python, Go, JavaScript, and TypeScript workflows.
 
-Velr is available today through public Rust, Python, JavaScript, and TypeScript
-drivers. Each driver wraps a bundled native runtime implemented in Rust, so
-applications can use Velr without running a separate service.
+Velr is available today through public Rust, Python, Go, JavaScript, and
+TypeScript drivers. Each driver wraps a bundled native runtime implemented in
+Rust, so applications can use Velr without running a separate service.
 
 ## Public Resources
 
@@ -44,6 +46,12 @@ applications can use Velr without running a separate service.
 - Package: [velr on PyPI](https://pypi.org/project/velr/)
 - Examples: [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
 
+### Go
+
+- Module: [velr-go-driver](https://github.com/velr-ai/velr-go-driver)
+- API docs: [velr-go-driver on pkg.go.dev](https://pkg.go.dev/github.com/velr-ai/velr-go-driver)
+- Examples: [velr-go-examples](https://github.com/velr-ai/velr-go-examples)
+
 ### JavaScript / TypeScript
 
 - Package: [@velr-ai/velr on npm](https://www.npmjs.com/package/@velr-ai/velr)
@@ -58,8 +66,9 @@ Velr is currently in **public alpha**.
 - The current public drivers are in the `0.2.x` series.
 - Velr supports openCypher and passes all positive openCypher TCK tests. Exact
   error semantics are not guaranteed to match other openCypher implementations.
-- Fulltext search and vector search are available today through Cypher DDL and
-  `CALL` syntax. Their APIs may still evolve while Velr remains alpha.
+- Full-text BM25 search and vector approximate nearest neighbor (ANN) search
+  are available today through Cypher DDL and `CALL` syntax. Their APIs may
+  still evolve while Velr remains alpha.
 
 Velr is already useful for real workflows and representative use cases, but you
 should expect rough edges while the project moves toward a stable 1.0 release.
@@ -69,18 +78,19 @@ should expect rough edges while the project moves toward a stable 1.0 release.
 - Embedded graph database runtime backed by SQLite
 - In-memory and file-backed databases
 - openCypher query execution
-- Rust, Python, JavaScript, and TypeScript public drivers with bundled native
-  runtimes
+- Rust, Python, Go, JavaScript, and TypeScript public drivers with bundled
+  native runtimes
 - Query parameter binding in the public drivers
 - Transactions and savepoints
 - Read-only database opening for viewers, agents, and inspection tools
 - Explicit database migration support
 - Observed graph-shape introspection with `SHOW CURRENT GRAPH SHAPE`
-- Fulltext indexes with `CREATE FULLTEXT INDEX`
-- Vector indexes with `CREATE VECTOR INDEX` and application-provided embedders
+- Full-text BM25 indexes with `CREATE FULLTEXT INDEX`
+- Vector approximate nearest neighbor (ANN) indexes with `CREATE VECTOR INDEX`
+  and application-provided embedders
 - Result streaming and bounded previews
 - Arrow IPC support, including Python interop with PyArrow, pandas, and Polars
-  and JavaScript/TypeScript interop with Apache Arrow
+  and Go/JavaScript/TypeScript interop with Apache Arrow
 
 ## Quickstart
 
@@ -112,6 +122,50 @@ with Velr.open(None) as db:
 ```
 
 Use `Velr.open("graph.db")` for a file-backed database.
+
+### Go
+
+Install the Go module:
+
+```sh
+go get github.com/velr-ai/velr-go-driver@latest
+```
+
+Go 1.22 or newer is required.
+
+```go
+package main
+
+import (
+	"fmt"
+	"log"
+
+	velr "github.com/velr-ai/velr-go-driver"
+)
+
+func main() {
+	db, err := velr.OpenInMemory()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
+	err = db.RunWithParams("CREATE (:Person {name: $name})", velr.Params{
+		"name": "Ada Lovelace",
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rows, err := db.Query("MATCH (p:Person) RETURN p.name AS name")
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println(rows)
+}
+```
+
+Use `velr.Open("graph.db")` for a file-backed database.
 
 ### JavaScript / TypeScript
 
@@ -183,14 +237,16 @@ Use `Velr::open(Some("graph.db"))` for a file-backed database.
 The main path to Velr 1.0 is stabilization: clearer error behavior, stable
 public APIs, and better documentation.
 
-Vector search, fulltext search, graph-shape introspection, parameter binding,
-transactions, and data-frame/Arrow interop are already present and will continue
-to harden. Longer-term directions include time-series and federation.
+Vector approximate nearest neighbor (ANN) search, full-text BM25 search,
+graph-shape introspection, parameter binding, transactions, and data-frame/Arrow
+interop are already present and will continue to harden. Longer-term directions
+include time-series and federation.
 
 ## License
 
 The public Rust, Python, JavaScript, and TypeScript driver source packages are
-licensed under MIT. The bundled native runtime binaries may be used and freely
+licensed under MIT. The Go driver source package currently uses the Velr project
+beta test license. The bundled native runtime binaries may be used and freely
 redistributed in unmodified form under the Velr Free Binary Redistribution
 License (`LICENSE.runtime` in each package). See the package license files for
 the full terms.
