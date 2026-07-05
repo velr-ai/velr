@@ -22,11 +22,12 @@ It also supports full-text BM25 search and vector approximate nearest neighbor
 It runs in-process instead of as a separate database server. That makes it a
 good fit for applications that need graph queries close to their data:
 local-first software, edge and physical AI systems, agent memory, data products,
-and modern Rust, Python, Go, JavaScript, and TypeScript workflows.
+and modern Rust, Python, Go, Java, Kotlin, JavaScript, and TypeScript workflows.
 
-Velr is available today through public Rust, Python, Go, JavaScript, and
-TypeScript drivers. Each driver wraps a bundled native runtime implemented in
-Rust, so applications can use Velr without running a separate service.
+Velr is available today through public Rust, Python, Go, Java, Kotlin,
+JavaScript, and TypeScript drivers. Each driver wraps a bundled native runtime
+implemented in Rust, so applications can use Velr without running a separate
+service.
 
 ## Public Resources
 
@@ -51,6 +52,24 @@ Rust, so applications can use Velr without running a separate service.
 - Module: [velr-go-driver](https://github.com/velr-ai/velr-go-driver)
 - API docs: [velr-go-driver on pkg.go.dev](https://pkg.go.dev/github.com/velr-ai/velr-go-driver)
 - Examples: [velr-go-examples](https://github.com/velr-ai/velr-go-examples)
+
+### Java
+
+- Maven Central JVM artifact: [velr-java-driver](https://central.sonatype.com/artifact/ai.velr/velr-java-driver)
+- Maven Central Android artifact: [velr-java-driver-android](https://central.sonatype.com/artifact/ai.velr/velr-java-driver-android)
+- JVM API docs: [Java JVM docs](https://velr-ai.github.io/velr-java-driver/docs/jvm/)
+- Android API docs: [Java Android docs](https://velr-ai.github.io/velr-java-driver/docs/android/)
+- Driver repository: [velr-java-driver](https://github.com/velr-ai/velr-java-driver)
+- Examples: [velr-java-examples](https://github.com/velr-ai/velr-java-examples)
+
+### Kotlin
+
+- Maven Central JVM artifact: [velr-kotlin-driver](https://central.sonatype.com/artifact/ai.velr/velr-kotlin-driver)
+- Maven Central Android artifact: [velr-kotlin-driver-android](https://central.sonatype.com/artifact/ai.velr/velr-kotlin-driver-android)
+- JVM API docs: [Kotlin JVM docs](https://velr-ai.github.io/velr-kotlin-driver/docs/jvm/)
+- Android API docs: [Kotlin Android docs](https://velr-ai.github.io/velr-kotlin-driver/docs/android/)
+- Driver repository: [velr-kotlin-driver](https://github.com/velr-ai/velr-kotlin-driver)
+- Examples: [velr-kotlin-examples](https://github.com/velr-ai/velr-kotlin-examples)
 
 ### JavaScript / TypeScript
 
@@ -78,8 +97,8 @@ should expect rough edges while the project moves toward a stable 1.0 release.
 - Embedded graph database runtime backed by SQLite
 - In-memory and file-backed databases
 - openCypher query execution
-- Rust, Python, Go, JavaScript, and TypeScript public drivers with bundled
-  native runtimes
+- Rust, Python, Go, Java, Kotlin, JavaScript, and TypeScript public drivers
+  with bundled native runtimes
 - Query parameter binding in the public drivers
 - Transactions and savepoints
 - Read-only database opening for viewers, agents, and inspection tools
@@ -89,8 +108,9 @@ should expect rough edges while the project moves toward a stable 1.0 release.
 - Vector approximate nearest neighbor (ANN) indexes with `CREATE VECTOR INDEX`
   and application-provided embedders
 - Result streaming and bounded previews
-- Arrow IPC support, including Python interop with PyArrow, pandas, and Polars
-  and Go/JavaScript/TypeScript interop with Apache Arrow
+- Arrow IPC support, including Python interop with PyArrow, pandas, and Polars,
+  Go/JavaScript/TypeScript interop with Apache Arrow, and Java/Kotlin Arrow IPC
+  and Arrow C Data bindings
 
 ## Quickstart
 
@@ -166,6 +186,76 @@ func main() {
 ```
 
 Use `velr.Open("graph.db")` for a file-backed database.
+
+### Java
+
+Add the JVM artifact from Maven Central:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("ai.velr:velr-java-driver:0.2.35")
+}
+```
+
+For Android applications, use
+`implementation("ai.velr:velr-java-driver-android:0.2.35")`.
+
+```java
+import ai.velr.QueryOptions;
+import ai.velr.Velr;
+import java.util.List;
+import java.util.Map;
+
+try (Velr db = Velr.open()) {
+    db.run(
+        "CREATE (:Person {name: $name})",
+        QueryOptions.builder().param("name", "Ada Lovelace").build());
+
+    List<Map<String, Object>> rows =
+        db.query("MATCH (p:Person) RETURN p.name AS name");
+    System.out.println(rows);
+}
+```
+
+Use `Velr.open("graph.db")` for a file-backed database.
+
+### Kotlin
+
+Add the JVM artifact from Maven Central:
+
+```kotlin
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("ai.velr:velr-kotlin-driver:0.2.35")
+}
+```
+
+For Android applications, use
+`implementation("ai.velr:velr-kotlin-driver-android:0.2.35")`.
+
+```kotlin
+import ai.velr.QueryOptions
+import ai.velr.velr
+
+velr().use { db ->
+    db.run(
+        "CREATE (:Person {name: $name})",
+        QueryOptions.builder().param("name", "Ada Lovelace").build(),
+    )
+
+    val rows = db.query("MATCH (p:Person) RETURN p.name AS name")
+    println(rows)
+}
+```
+
+Use `velr("graph.db")` for a file-backed database.
 
 ### JavaScript / TypeScript
 
@@ -244,9 +334,9 @@ include time-series and federation.
 
 ## License
 
-The public Rust, Python, JavaScript, and TypeScript driver source packages are
-licensed under MIT. The Go driver source package currently uses the Velr project
-beta test license. The bundled native runtime binaries may be used and freely
-redistributed in unmodified form under the Velr Free Binary Redistribution
-License (`LICENSE.runtime` in each package). See the package license files for
-the full terms.
+The public Rust, Python, Java, Kotlin, JavaScript, and TypeScript driver source
+packages are licensed under MIT. The Go driver source package currently uses the
+Velr project beta test license. The bundled native runtime binaries may be used
+and freely redistributed in unmodified form under the Velr Free Binary
+Redistribution License (`LICENSE.runtime` in each package). See the package
+license files for the full terms.
