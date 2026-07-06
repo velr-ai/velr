@@ -1,0 +1,32 @@
+[package]
+name = "velr-cli"
+# The CLI release version follows the git release tag. Release automation can
+# pin the public Rust driver to the same version or an explicit override.
+version = "0.2.36"
+edition = "2021"
+description = "Command-line interface for Velr"
+license-file = "LICENSE"
+readme = "README.md"
+homepage = "https://velr.ai"
+repository = "https://github.com/velr-ai/velr"
+
+[features]
+default = []
+fulltext-tantivy = []
+vector-usearch = []
+arrow-ipc = []
+
+[dependencies]
+# Public main tracks the latest compatible 0.2.x Rust driver. Release tags are
+# rewritten by CI to an exact =X.Y.Z driver pin for reproducible source builds.
+velr = { version = "0.2", registry = "crates-io" }
+tabled = "0.20.0"
+reedline = "0.41.0"
+
+[dev-dependencies]
+csv = "1"
+serde_json = "1"
+
+[[bin]]
+name = "velr"
+path = "src/main.rs"
