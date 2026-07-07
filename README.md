@@ -55,6 +55,18 @@ brew trust --formula velr-ai/velr/velr
 brew install velr
 ```
 
+Run a query and exit:
+
+```sh
+velr -e 'MATCH (n) RETURN n LIMIT 5'
+```
+
+Open an interactive shell on a database file:
+
+```sh
+velr graph.db
+```
+
 For shell usage, release archives, and build-from-source instructions, see the
 [Velr CLI README](rust/velr-cli/README.md).
 
