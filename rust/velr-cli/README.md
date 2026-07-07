@@ -16,6 +16,14 @@ brew tap velr-ai/velr
 brew install velr
 ```
 
+If Homebrew is configured to require trust for third-party taps and refuses to
+load the formula, trust the Velr tap once and rerun the install:
+
+```sh
+brew trust --tap velr-ai/velr
+brew install velr
+```
+
 The Homebrew formula builds `rust/velr-cli` from the public release source and
 links it against the public Velr Rust driver crate for that release.
 
