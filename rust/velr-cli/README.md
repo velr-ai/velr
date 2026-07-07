@@ -7,10 +7,33 @@ queries from stdin, or open an interactive REPL for exploring a Velr database.
 Install
 -------
 
-Prebuilt archives are published on the
+On macOS, the recommended install path is the Velr Homebrew tap. The same tap
+also works on Linux and Windows Subsystem for Linux (WSL) for users who manage
+CLI tools with Homebrew:
+
+```sh
+brew tap velr-ai/velr
+brew install velr
+```
+
+The Homebrew formula builds `rust/velr-cli` from the public release source and
+links it against the public Velr Rust driver crate for that release.
+
+For Linux users who prefer direct binaries, Windows users, and manual installs,
+prebuilt archives are published on the
 [velr-ai/velr releases page](https://github.com/velr-ai/velr/releases) for
 macOS, Linux, and Windows. Download the archive for your platform, unpack it,
 and place `velr` or `velr.exe` somewhere on your `PATH`.
+
+The macOS release archive binaries are unsigned. We recommend Homebrew on
+macOS. If you still want to use the release archive, remove the quarantine
+attribute after unpacking:
+
+```sh
+xattr -d com.apple.quarantine /path/to/velr
+```
+
+Verify the install:
 
 ```sh
 velr --version
