@@ -374,9 +374,7 @@ include time-series and federation.
 
 ## License
 
-The public Rust, Python, Java, Kotlin, JavaScript, and TypeScript driver source
-packages are licensed under MIT. The Go driver source package currently uses the
-Velr project beta test license. The bundled native runtime binaries may be used
-and freely redistributed in unmodified form under the Velr Free Binary
-Redistribution License (`LICENSE.runtime` in each package). See the package
-license files for the full terms.
+The public driver source packages are licensed under MIT. The bundled native
+runtime binaries may be used and freely redistributed in unmodified form under
+the Velr Free Binary Redistribution License (`LICENSE.runtime` in each package).
+See the package license files for the full terms.
