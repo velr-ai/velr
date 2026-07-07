@@ -35,6 +35,29 @@ service.
 - Community questions: [GitHub Discussions](https://github.com/velr-ai/velr/discussions)
 - Bug reports and feature requests: [GitHub Issues](https://github.com/velr-ai/velr/issues)
 
+### Command Line Shell
+
+The Velr CLI (`velr`) is an interactive shell and scripting tool for running
+Cypher queries, opening local Velr database files, and inspecting query plans
+from a terminal.
+
+Install with Homebrew on macOS, Linux, or Windows Subsystem for Linux (WSL):
+
+```sh
+brew tap velr-ai/velr
+brew install velr
+```
+
+If Homebrew asks you to trust the third-party formula first:
+
+```sh
+brew trust --formula velr-ai/velr/velr
+brew install velr
+```
+
+For shell usage, release archives, and build-from-source instructions, see the
+[Velr CLI README](rust/velr-cli/README.md).
+
 ### Rust
 
 - Crate: [velr on crates.io](https://crates.io/crates/velr)
