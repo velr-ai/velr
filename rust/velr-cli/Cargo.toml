@@ -19,7 +19,7 @@ arrow-ipc = []
 [dependencies]
 # Public main tracks the latest compatible 0.2.x Rust driver. Release tags are
 # rewritten by CI to an exact =X.Y.Z driver pin for reproducible source builds.
-velr = { version = "0.2", registry = "crates-io" }
+velr = { version = "=0.2.36", registry = "crates-io" }
 tabled = "0.20.0"
 reedline = "0.41.0"
 
