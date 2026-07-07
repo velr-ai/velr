@@ -17,15 +17,15 @@ brew install velr
 ```
 
 If Homebrew is configured to require trust for third-party taps and refuses to
-load the formula, trust the Velr tap once and rerun the install:
+load the formula, trust the Velr formula once and rerun the install:
 
 ```sh
-brew trust --tap velr-ai/velr
+brew trust --formula velr-ai/velr/velr
 brew install velr
 ```
 
-The Homebrew formula builds `rust/velr-cli` from the public release source and
-links it against the public Velr Rust driver crate for that release.
+The Homebrew formula installs the prebuilt Velr CLI archive for your platform.
+It does not require a local Rust toolchain.
 
 For Linux users who prefer direct binaries, Windows users, and manual installs,
 prebuilt archives are published on the
