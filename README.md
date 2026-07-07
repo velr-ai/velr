@@ -70,25 +70,30 @@ velr graph.db
 For shell usage, release archives, and build-from-source instructions, see the
 [Velr CLI README](rust/velr-cli/README.md).
 
-### Rust
+### Language Drivers
+
+Use the language-specific drivers when embedding Velr directly in an
+application.
+
+#### Rust
 
 - Crate: [velr on crates.io](https://crates.io/crates/velr)
 - API docs: [velr on docs.rs](https://docs.rs/velr/latest/velr/)
 - Driver repository: [velr-rust-driver](https://github.com/velr-ai/velr-rust-driver)
 - Examples: [velr-rust-examples](https://github.com/velr-ai/velr-rust-examples)
 
-### Python
+#### Python
 
 - Package: [velr on PyPI](https://pypi.org/project/velr/)
 - Examples: [velr-python-examples](https://github.com/velr-ai/velr-python-examples)
 
-### Go
+#### Go
 
 - Module: [velr-go-driver](https://github.com/velr-ai/velr-go-driver)
 - API docs: [velr-go-driver on pkg.go.dev](https://pkg.go.dev/github.com/velr-ai/velr-go-driver)
 - Examples: [velr-go-examples](https://github.com/velr-ai/velr-go-examples)
 
-### Java
+#### Java
 
 - Maven Central JVM artifact: [velr-java-driver](https://central.sonatype.com/artifact/ai.velr/velr-java-driver)
 - Maven Central Android artifact: [velr-java-driver-android](https://central.sonatype.com/artifact/ai.velr/velr-java-driver-android)
@@ -97,7 +102,7 @@ For shell usage, release archives, and build-from-source instructions, see the
 - Driver repository: [velr-java-driver](https://github.com/velr-ai/velr-java-driver)
 - Examples: [velr-java-examples](https://github.com/velr-ai/velr-java-examples)
 
-### Kotlin
+#### Kotlin
 
 - Maven Central JVM artifact: [velr-kotlin-driver](https://central.sonatype.com/artifact/ai.velr/velr-kotlin-driver)
 - Maven Central Android artifact: [velr-kotlin-driver-android](https://central.sonatype.com/artifact/ai.velr/velr-kotlin-driver-android)
@@ -106,7 +111,7 @@ For shell usage, release archives, and build-from-source instructions, see the
 - Driver repository: [velr-kotlin-driver](https://github.com/velr-ai/velr-kotlin-driver)
 - Examples: [velr-kotlin-examples](https://github.com/velr-ai/velr-kotlin-examples)
 
-### JavaScript / TypeScript
+#### JavaScript / TypeScript
 
 - Package: [@velr-ai/velr on npm](https://www.npmjs.com/package/@velr-ai/velr)
 - JavaScript examples: [velr-javascript-examples](https://github.com/velr-ai/velr-javascript-examples)
