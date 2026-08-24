@@ -47,26 +47,19 @@ fn find_lockfile_driver_version(manifest_dir: &Path) -> Option<String> {
         .find(|candidate| candidate.exists())?;
     let text = fs::read_to_string(lockfile).ok()?;
     let packages = parse_lock_packages(&text);
-    let registry_velr = packages
+    let driver_packages = packages
         .iter()
-        .filter(|package| {
-            package.name.as_deref() == Some("velr")
-                && package
-                    .source
-                    .as_deref()
-                    .map(|source| source.starts_with("registry+"))
-                    .unwrap_or(false)
-        })
+        .filter(|package| package.name.as_deref() == Some("velr"))
         .collect::<Vec<_>>();
 
     if let Some(cli) = find_cli_lock_package(&packages) {
         for dependency in &cli.dependencies {
-            if dependency == "velr" && registry_velr.len() == 1 {
-                return registry_velr[0].version.clone();
+            if dependency == "velr" && driver_packages.len() == 1 {
+                return driver_packages[0].version.clone();
             }
             if let Some(rest) = dependency.strip_prefix("velr ") {
                 let version = rest.split_whitespace().next()?;
-                if let Some(package) = registry_velr
+                if let Some(package) = driver_packages
                     .iter()
                     .find(|package| package.version.as_deref() == Some(version))
                 {
@@ -76,8 +69,8 @@ fn find_lockfile_driver_version(manifest_dir: &Path) -> Option<String> {
         }
     }
 
-    if registry_velr.len() == 1 {
-        registry_velr[0].version.clone()
+    if driver_packages.len() == 1 {
+        driver_packages[0].version.clone()
     } else {
         None
     }
