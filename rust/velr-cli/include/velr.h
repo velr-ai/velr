@@ -143,6 +143,7 @@ int       velr_rows_next(velr_rows* rows, struct velr_cell* buf, size_t buf_len,
 /* Close row iterator. */
 void      velr_rows_close(velr_rows* rows);
 
+
 #ifdef __cplusplus
 }
 #endif

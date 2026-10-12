@@ -917,6 +917,9 @@ fn mixed_explain_and_query_stays_on_table_stream() {
 fn ndjson_explain_output_is_valid_for_complex_trace() {
     let db = seeded_graph_db();
     let query = complex_explain_query();
+    // Exercise control-character escaping independently of SQL pretty-printing.
+    assert!(query.contains('\n'));
+    assert!(query.contains('\t'));
     let output = velr()
         .arg(db.path_str())
         .arg("-f")
@@ -945,9 +948,12 @@ fn ndjson_explain_output_is_valid_for_complex_trace() {
 
     let sql = rows
         .iter()
-        .find_map(|row| row.get("sql").and_then(Value::as_str))
-        .expect("complex explain should include a SQL row");
-    assert!(sql.contains('\n'));
+        .filter_map(|row| row.get("sql").and_then(Value::as_str))
+        // Planner diagnostics can precede the SQL for the requested projection.
+        .find(|sql| {
+            sql.contains("\"actor\"") || sql.contains("\"title\"") || sql.contains("\"tagline\"")
+        })
+        .expect("complex explain should include SQL for the requested projection");
     assert!(sql.contains("SELECT"));
     assert!(sql.contains("\"actor\"") || sql.contains("\"title\"") || sql.contains("\"tagline\""));
 

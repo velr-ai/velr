@@ -370,7 +370,7 @@ fn is_rejected_option_like_arg(arg: &str, reject_windows_style_flags: bool) -> b
 }
 
 fn is_windows_style_flag(arg: &str) -> bool {
-    arg.starts_with('/') && arg.len() > 1
+    velr_cli::arguments::is_windows_style_flag(arg)
 }
 
 fn default_format(stdout_is_terminal: bool) -> RenderMode {
@@ -1137,6 +1137,21 @@ mod tests {
                 .expect("unix absolute path should parse when windows slash flags are disabled");
 
         assert_eq!(config.db_path, Some("/tmp/graph.db".to_string()));
+    }
+
+    #[test]
+    fn windows_drive_unc_and_rooted_paths_are_not_switches() {
+        for path in [
+            r"C:\data dir\graph.db",
+            "C:/data/graph.db",
+            r"\\server\share\graph.db",
+            "//server/share/graph.db",
+            "/data/graph.db",
+        ] {
+            let config =
+                parse_args_from_inner(vec![OsString::from(path)], true, true, true).unwrap();
+            assert_eq!(config.db_path.as_deref(), Some(path));
+        }
     }
 
     #[test]
