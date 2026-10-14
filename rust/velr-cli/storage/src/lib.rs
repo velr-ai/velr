@@ -11,6 +11,11 @@ pub use schema::{
 
 pub fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    // A modest, fixed cache target keeps ordinary indexed multi-entity writes
+    // from spilling dirty pages to WAL before their transaction completes.
+    // SQLite allocates on demand; this is per connection and changes neither
+    // foreign-key enforcement nor the durability policy.
+    conn.pragma_update(None, "cache_size", -32_768i64)?;
     conn.execute_batch(
         "PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON; PRAGMA temp_store=MEMORY; PRAGMA case_sensitive_like=ON;",
     )
