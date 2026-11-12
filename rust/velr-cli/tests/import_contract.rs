@@ -105,16 +105,242 @@ fn importer_help_and_version_have_no_side_effects() {
     assert_eq!(fs::read_dir(&dir.0).unwrap().count(), 0);
 }
 
+#[cfg(feature = "experimental-compact-default")]
+#[test]
+fn database_create_reserves_an_exact_inline_edge_property() {
+    use rusqlite::{Connection, OpenFlags};
+    use velr_storage::{compact::inline_edge_properties, mapped_slots::verify_schema_fingerprint};
+
+    let dir = TestDir::new();
+    let path = dir.database();
+    for (value, diagnostic) in [
+        ("", "nonempty"),
+        ("timestamp,", "empty"),
+        ("timestamp,timestamp", "duplicate"),
+        ("timestamp,other", "at most one"),
+    ] {
+        let output = admin(&dir)
+            .args(["database", "create"])
+            .arg(&path)
+            .arg(format!("--inline-edge-properties={value}"))
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains(diagnostic), "{error}");
+        dir.assert_no_database_artifacts();
+    }
+    ok(admin(&dir)
+        .args(["database", "create"])
+        .arg(&path)
+        .arg(r#"--inline-edge-properties="recorded,at""#)
+        .output()
+        .unwrap());
+    let original = fs::read(&path).unwrap();
+    let duplicate = admin(&dir)
+        .args(["database", "create"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(!duplicate.status.success());
+    assert_eq!(fs::read(&path).unwrap(), original);
+
+    let empty = dir.0.join("empty.db");
+    ok(admin(&dir)
+        .args(["database", "create"])
+        .arg(&empty)
+        .output()
+        .unwrap());
+    for (path, mapping) in [(&path, vec!["recorded,at"]), (&empty, Vec::new())] {
+        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let version: i32 = conn
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 11);
+        assert_eq!(inline_edge_properties(&conn).unwrap(), mapping);
+        verify_schema_fingerprint(&conn).unwrap();
+    }
+}
+
+#[cfg(feature = "experimental-compact-default")]
+#[test]
+fn import_inline_edge_policy_covers_packed_and_sql_paths() {
+    use rusqlite::{Connection, OpenFlags};
+    use velr_storage::{compact::inline_edge_properties, mapped_slots::verify_schema_fingerprint};
+
+    let dir = TestDir::new();
+    let spill = "x".repeat(129);
+    dir.file("people.csv", ":ID,name\n1,Ada\n");
+    dir.file(
+        "links.csv",
+        &format!(":START_ID,:END_ID,timestamp:long,rare\n1,1,11,short\n1,1,12,{spill}\n1,1,13,\n"),
+    );
+    let manifest = r#"
+[[nodes]]
+labels = ["Person"]
+files = ["people.csv"]
+[[relationships]]
+type = "LINK"
+files = ["links.csv"]
+"#;
+    dir.file(
+        "explicit.toml",
+        &format!("version = 1\ninline_edge_properties = [\"rare\"]\n{manifest}"),
+    );
+    dir.file(
+        "off.toml",
+        &format!("version = 1\ninline_edge_properties = []\n{manifest}"),
+    );
+
+    let cases: [(&str, &[&str], bool, Option<&str>, i64); 7] = [
+        ("auto", &[], true, Some("timestamp"), 3),
+        (
+            "sparse",
+            &["--inline-edge-properties=rare"],
+            true,
+            Some("rare"),
+            1,
+        ),
+        (
+            "absent",
+            &["--inline-edge-properties=future"],
+            true,
+            Some("future"),
+            0,
+        ),
+        (
+            "fallback",
+            &["--id-type=ACTUAL", "--inline-edge-properties=rare"],
+            false,
+            Some("rare"),
+            1,
+        ),
+        (
+            "manifest",
+            &["--manifest=explicit.toml"],
+            true,
+            Some("rare"),
+            1,
+        ),
+        (
+            "override",
+            &["--no-inline-edge-properties", "--manifest=explicit.toml"],
+            true,
+            None,
+            0,
+        ),
+        ("off", &["--manifest=off.toml"], true, None, 0),
+    ];
+    for (name, args, packed, selected, inline_count) in cases {
+        let path = dir.0.join(format!("{name}.db"));
+        let mut command = admin(&dir);
+        if args.iter().any(|arg| arg.starts_with("--manifest=")) {
+            command.arg("import");
+        } else {
+            command.args([
+                "database",
+                "import",
+                "full",
+                "--nodes=Person=people.csv",
+                "--relationships=LINK=links.csv",
+            ]);
+        }
+        let output = ok(command
+            .arg(&path)
+            .args(args)
+            .env("VELR_IMPORT_PROFILE", "1")
+            .output()
+            .unwrap());
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains("packed tables and indexes"),
+            packed,
+            "{name}"
+        );
+        let mapping: Vec<_> = selected.into_iter().collect();
+        let reported = format!("Inline edge properties: {mapping:?}");
+        assert!(
+            fs::read_to_string(dir.0.join("import.report"))
+                .unwrap()
+                .contains(&reported),
+            "{name}"
+        );
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(inline_edge_properties(&conn).unwrap(), mapping, "{name}");
+        verify_schema_fingerprint(&conn).unwrap();
+        if selected.is_some() {
+            let stored: i64 = conn
+                .query_row("SELECT count(__vrs_p0) FROM edge", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(stored, inline_count, "{name}");
+        } else {
+            let slot_columns: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM pragma_table_info('edge') WHERE name='__vrs_p0'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(slot_columns, 0, "{name}");
+        }
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM __vrs_edge_property", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows + inline_count, 5, "{name}");
+        let preserved: String = conn.query_row(
+            "SELECT value FROM __vrs_edge_property JOIN key_dict ON key_dict.id=key_id WHERE edge_id=2 AND name='rare'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(preserved, spill, "{name}");
+    }
+}
+
 #[test]
 fn offline_import_runs_without_loading_the_bundled_runtime() {
     let dir = TestDir::new();
     let people = dir.file("people.csv", ":ID,name\n1,Ada\n");
+    let spill = "x".repeat(129);
+    let links = dir.file(
+        "links.csv",
+        &format!(":START_ID,:END_ID,body\n1,1,first\n1,1,{spill}\n1,1,last\n"),
+    );
     let missing_runtime = dir.0.join("missing-runtime-library");
     ok(import(&dir)
         .arg(format!("--nodes=Person={}", people.display()))
+        .arg(format!("--relationships=LINK={}", links.display()))
         .env("VELR_RUNTIME_PATH", &missing_runtime)
         .output()
         .unwrap());
+    {
+        let conn = rusqlite::Connection::open_with_flags(
+            dir.database(),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let version: i32 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        #[cfg(not(feature = "experimental-compact-default"))]
+        assert_eq!(version, 9);
+        #[cfg(feature = "experimental-compact-default")]
+        {
+            assert_eq!(version, 11);
+            velr_storage::mapped_slots::verify_schema_fingerprint(&conn).unwrap();
+            let (mapped, inline, spilled): (String, i64, i64) = conn
+                .query_row(
+                    "SELECT key_dict.name,
+                            (SELECT count(*) FROM edge WHERE __vrs_p0 IS NOT NULL),
+                            (SELECT count(*) FROM __vrs_edge_property)
+                     FROM __vrs_inline_map JOIN key_dict ON key_dict.id=key_id
+                     WHERE slot=0",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!((mapped.as_str(), inline, spilled), ("body", 2, 1));
+        }
+    }
     let query = Command::new(env!("CARGO_BIN_EXE_velr"))
         .arg(dir.database())
         .args(["-e", "RETURN 1"])
@@ -129,6 +355,181 @@ fn offline_import_runs_without_loading_the_bundled_runtime() {
         rows(&dir.database(), "MATCH (p:Person) RETURN p.name AS name"),
         vec![json!({"name":"Ada"})]
     );
+    assert_eq!(
+        rows(
+            &dir.database(),
+            "MATCH ()-[r:LINK]->() RETURN id(r) AS id, r.body AS body ORDER BY id"
+        ),
+        vec![
+            json!({"id":1,"body":"first"}),
+            json!({"id":2,"body":spill}),
+            json!({"id":3,"body":"last"})
+        ]
+    );
+}
+
+#[cfg(feature = "experimental-compact-default")]
+#[test]
+fn final_import_vacuum_is_opt_in_and_preserves_compact_data() {
+    use rusqlite::{types::Value as SqliteValue, Connection, OpenFlags};
+
+    let dir = TestDir::new();
+    let spill = "x".repeat(129);
+    dir.file("people.csv", ":ID,rank:long\n1,9007199254740993\n");
+    dir.file(
+        "links.csv",
+        &format!(":START_ID,:END_ID,body\n1,1,first\n1,1,{spill}\n1,1,last\n"),
+    );
+    dir.file(
+        "import.toml",
+        r#"version = 1
+vacuum = true
+
+[[nodes]]
+labels = ["Person"]
+files = ["people.csv"]
+
+[[relationships]]
+type = "LINK"
+files = ["links.csv"]
+"#,
+    );
+
+    let preview = ok(admin(&dir)
+        .arg("import")
+        .arg(dir.database())
+        .args(["--manifest=import.toml", "--vacuum=false", "--dry-run"])
+        .output()
+        .unwrap());
+    let plan = String::from_utf8_lossy(&preview.stdout);
+    assert!(
+        plan.lines().any(|line| line == "Final VACUUM: false"),
+        "expected the resolved vacuum setting in the dry-run plan: {plan}"
+    );
+    dir.assert_no_database_artifacts();
+    assert!(!dir.0.join("import.report").exists());
+
+    let long_args = [
+        "--nodes=Person=people.csv",
+        "--relationships=LINK=links.csv",
+    ];
+    for (name, command, args, vacuum) in [
+        (
+            "default",
+            &["database", "import", "full"][..],
+            &long_args[..],
+            false,
+        ),
+        (
+            "explicit",
+            &["database", "import", "full"][..],
+            &[long_args[0], long_args[1], "--vacuum"][..],
+            true,
+        ),
+        (
+            "manifest",
+            &["import"][..],
+            &["--manifest=import.toml"][..],
+            true,
+        ),
+        (
+            "override",
+            &["import"][..],
+            &["--vacuum=false", "--manifest=import.toml"][..],
+            false,
+        ),
+    ] {
+        let path = dir.0.join(format!("{name}.db"));
+        let output = ok(admin(&dir)
+            .args(command)
+            .arg(&path)
+            .args(args)
+            .env("VELR_IMPORT_PROFILE", "1")
+            .output()
+            .unwrap());
+        let profile = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(
+            profile.contains("offline import compact vacuum pages:"),
+            vacuum,
+            "unexpected vacuum behavior for {name}: {profile}"
+        );
+
+        let conn = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+            .unwrap();
+        let foreign_key_errors: i64 = conn
+            .query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            (
+                version,
+                integrity.as_str(),
+                foreign_key_errors,
+                journal_mode.as_str()
+            ),
+            (11, "ok", 0, "wal")
+        );
+        velr_storage::mapped_slots::verify_schema_fingerprint(&conn).unwrap();
+
+        let node: (i64, String, SqliteValue) = conn
+            .query_row(
+                "SELECT n.id, k.name, p.value FROM node n JOIN node_property p ON p.node_id=n.id
+             JOIN key_dict k ON k.id=p.key_id",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            node,
+            (
+                1,
+                "rank".into(),
+                SqliteValue::Integer(9_007_199_254_740_993)
+            )
+        );
+        let mut edge_query = conn
+            .prepare(
+                "SELECT e.id, e.from_node, e.to_node, e.__vrs_p0, p.value
+             FROM edge e LEFT JOIN __vrs_edge_property p ON p.edge_id=e.id ORDER BY e.id",
+            )
+            .unwrap();
+        let edges: Vec<(i64, i64, i64, SqliteValue, SqliteValue)> = edge_query
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(
+            edges,
+            vec![
+                (
+                    1,
+                    1,
+                    1,
+                    SqliteValue::Text("first".into()),
+                    SqliteValue::Null
+                ),
+                (2, 1, 1, SqliteValue::Null, SqliteValue::Text(spill.clone())),
+                (3, 1, 1, SqliteValue::Text("last".into()), SqliteValue::Null),
+            ]
+        );
+    }
 }
 
 #[test]

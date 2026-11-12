@@ -93,6 +93,18 @@ impl RecordReader {
     }
 
     fn next_record(&mut self) -> io::Result<Option<(i64, &[u8])>> {
+        Ok(self.advance()?.map(|id| (id, self.current_record())))
+    }
+
+    fn current_record(&self) -> &[u8] {
+        if self.pending == 0 {
+            &self.record
+        } else {
+            &self.input.buffer()[12..self.pending]
+        }
+    }
+
+    fn advance(&mut self) -> io::Result<Option<i64>> {
         // The previous payload's borrow has ended before this call, so its
         // frame can now leave the buffer without copying its bytes.
         self.input.consume(self.pending);
@@ -125,7 +137,7 @@ impl RecordReader {
                 .checked_add(length as u64)
                 .ok_or_else(|| invalid("record spool offset overflow"))?;
             self.pending = length;
-            return Ok(Some((rowid, &self.input.buffer()[12..length])));
+            return Ok(Some(rowid));
         }
         // Preserve exact framing and truncation errors for a split header,
         // a split payload, or a record larger than the input buffer.
@@ -136,7 +148,7 @@ impl RecordReader {
         self.offset = frame_offset
             .checked_add(12 + self.record.len() as u64)
             .ok_or_else(|| invalid("record spool offset overflow"))?;
-        Ok(Some((rowid, &self.record)))
+        Ok(Some(rowid))
     }
 
     /// Byte offset of the frame returned by the most recent successful `next`.
@@ -157,6 +169,24 @@ impl RecordReader {
             .ok_or_else(|| invalid("record spool offset overflow"))?;
         Ok(row)
     }
+
+    fn read_witness_prefix(&mut self, offset: u64, prefix: &mut [u8]) -> io::Result<usize> {
+        self.pending = 0;
+        self.input.seek(SeekFrom::Start(offset))?;
+        let input = self.input.get_mut();
+        let (_, length) = read_frame_header(input)?
+            .ok_or_else(|| invalid("index statistics witness is outside the record spool"))?;
+        let prefix_len = prefix.len().min(length as usize);
+        input.read_exact(&mut prefix[..prefix_len])?;
+        self.frame_offset = offset;
+        self.offset = offset
+            .checked_add(12 + u64::from(length))
+            .ok_or_else(|| invalid("record spool offset overflow"))?;
+        if prefix_len < length as usize {
+            input.seek(SeekFrom::Start(self.offset))?;
+        }
+        Ok(prefix_len)
+    }
 }
 
 impl RecordSource for RecordReader {
@@ -169,15 +199,22 @@ fn invalid(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, message)
 }
 
-fn read_frame(input: &mut impl Read, record: &mut Vec<u8>) -> io::Result<Option<i64>> {
+fn read_frame_header(input: &mut impl Read) -> io::Result<Option<(i64, u32)>> {
     let mut header = [0; 12];
     if input.read(&mut header[..1])? == 0 {
         return Ok(None);
     }
     input.read_exact(&mut header[1..])?;
     let rowid = i64::from_le_bytes(header[..8].try_into().unwrap());
-    let length = u32::from_le_bytes(header[8..].try_into().unwrap()) as usize;
-    record.resize(length, 0);
+    let length = u32::from_le_bytes(header[8..].try_into().unwrap());
+    Ok(Some((rowid, length)))
+}
+
+fn read_frame(input: &mut impl Read, record: &mut Vec<u8>) -> io::Result<Option<i64>> {
+    let Some((rowid, length)) = read_frame_header(input)? else {
+        return Ok(None);
+    };
+    record.resize(length as usize, 0);
     input.read_exact(record)?;
     Ok(Some(rowid))
 }
@@ -191,6 +228,7 @@ struct OwnerProperties {
     records: Vec<Vec<u8>>,
     order: Vec<usize>,
     used: usize,
+    retained_bytes: usize,
 }
 
 impl OwnerProperties {
@@ -202,6 +240,7 @@ impl OwnerProperties {
             records: Vec::new(),
             order: Vec::new(),
             used: 0,
+            retained_bytes: 0,
         }
     }
     fn push(&mut self, owner: i64, key: i64, value: StorageValueRef<'_>) -> io::Result<()> {
@@ -213,7 +252,9 @@ impl OwnerProperties {
             self.records.push(Vec::new());
             self.keys.push(0);
         }
-        encode_property_record(owner, key, value, &mut self.records[self.used]);
+        let record = &mut self.records[self.used];
+        self.retained_bytes -= record.capacity();
+        encode_property_record(owner, key, value, record);
         self.keys[self.used] = key;
         self.used += 1;
         Ok(())
@@ -222,10 +263,19 @@ impl OwnerProperties {
         self.order.clear();
         self.order.extend(0..self.used);
         self.order.sort_unstable_by_key(|&i| self.keys[i]);
+        let retain_limit = self.spool.output.as_ref().unwrap().capacity();
         for &i in &self.order {
-            std::mem::swap(&mut self.spool.record, &mut self.records[i]);
+            let record = &mut self.records[i];
+            std::mem::swap(&mut self.spool.record, record);
             self.spool.push_encoded(self.owner)?;
-            std::mem::swap(&mut self.spool.record, &mut self.records[i]);
+            std::mem::swap(&mut self.spool.record, record);
+            // One wide owner can require large records while active. Limit
+            // the aggregate space reserved for reuse by later owners.
+            if record.capacity() > retain_limit - self.retained_bytes {
+                *record = Vec::new();
+            } else {
+                self.retained_bytes += record.capacity();
+            }
         }
         self.used = 0;
         Ok(())
@@ -235,10 +285,69 @@ impl OwnerProperties {
 pub(super) struct BodyWriter {
     pub(super) node: RecordSpool,
     pub(super) edge: RecordSpool,
-    pub(super) node_property: RecordSpool,
+    node_property: Option<RecordSpool>,
     node_primary: OwnerProperties,
     edge_property: OwnerProperties,
-    roots: [u32; 5],
+    roots: BodyRoots,
+    mapped_slot: Option<MappedSlot>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BodyRoots {
+    node: u32,
+    edge: u32,
+    node_property: u32,
+    node_primary: Option<u32>,
+    edge_property: u32,
+}
+
+#[derive(Clone, Copy)]
+struct EdgeSlot {
+    key: i64,
+    rows: u64,
+    max_bytes: usize,
+}
+
+struct MappedSlot {
+    slot: EdgeSlot,
+    property_path: PathBuf,
+}
+
+enum TreeKind<'a> {
+    Table,
+    MappedEdge(&'a MappedSlot),
+    Primary(&'static str, &'static str, usize, Option<EdgeSlot>),
+}
+
+type BodyTree<'a> = (u32, &'a mut RecordSpool, TreeKind<'a>);
+
+fn write_tree(
+    writer: &mut PageWriter,
+    (root, spool, kind): BodyTree<'_>,
+) -> io::Result<Option<(&'static str, &'static str, BuiltIndexStatistics)>> {
+    match kind {
+        TreeKind::Table => {
+            writer.table_from(root, &mut spool.reader()?)?;
+            Ok(None)
+        }
+        TreeKind::MappedEdge(mapping) => {
+            let mut source = MappedEdges {
+                edges: spool.reader()?,
+                values: SlotValues::open(mapping)?,
+                output: Vec::new(),
+            };
+            writer.table_from(root, &mut source)?;
+            Ok(None)
+        }
+        TreeKind::Primary(table, index, columns, omit) => {
+            let rows = spool
+                .rows
+                .checked_sub(omit.map_or(0, |slot| slot.rows))
+                .ok_or_else(|| invalid("edge slot count exceeds property rows"))?;
+            let statistics = write_primary_index(writer, root, spool, columns, rows, omit)?;
+            Ok((rows != 0).then_some((table, index, statistics)))
+        }
+    }
 }
 
 impl BodyWriter {
@@ -252,13 +361,29 @@ impl BodyWriter {
         Ok(Self {
             node: spool("node")?,
             edge: spool("edge")?,
-            node_property: spool("node-property")?,
+            node_property: roots
+                .node_primary
+                .map(|_| spool("node-property"))
+                .transpose()?,
             node_primary: OwnerProperties::new(spool("node-primary")?),
             edge_property: OwnerProperties::new(spool("edge-property")?),
             roots,
+            mapped_slot: None,
         })
     }
-    fn current_roots(conn: &Connection) -> Result<[u32; 5], String> {
+
+    #[cfg(feature = "experimental-compact-default")]
+    pub(super) fn prepare_edge_slot(&mut self, key: i64, rows: u64, max_bytes: usize) {
+        self.mapped_slot = Some(MappedSlot {
+            slot: EdgeSlot {
+                key,
+                rows,
+                max_bytes,
+            },
+            property_path: self.edge_property.spool.path.clone(),
+        });
+    }
+    fn current_roots(conn: &Connection) -> Result<BodyRoots, String> {
         let root = |name: &str| {
             conn.query_row(
                 "SELECT rootpage FROM sqlite_schema WHERE name=?",
@@ -267,18 +392,31 @@ impl BodyWriter {
             )
             .map_err(|error| error.to_string())
         };
-        Ok([
-            root("node")?,
-            root("edge")?,
-            root("node_property")?,
-            root("sqlite_autoindex_node_property_1")?,
-            root("edge_property")?,
-        ])
+        let without_rowid = conn
+            .query_row(
+                "SELECT wr FROM pragma_table_list WHERE schema='main' AND name='node_property'",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(BodyRoots {
+            node: root("node")?,
+            edge: root("edge")?,
+            node_property: root("node_property")?,
+            node_primary: (!without_rowid)
+                .then(|| root("sqlite_autoindex_node_property_1"))
+                .transpose()?,
+            edge_property: root("edge_property")?,
+        })
     }
     pub(super) fn refresh_roots(&mut self, conn: &Connection) -> Result<(), String> {
         // Bootstrap compaction can move roots while graph rows remain spooled.
         // Resolve their current locations immediately before physical writing.
-        self.roots = Self::current_roots(conn)?;
+        let roots = Self::current_roots(conn)?;
+        if roots.node_primary.is_some() != self.node_property.is_some() {
+            return Err("node property layout changed while writing packed records".into());
+        }
+        self.roots = roots;
         Ok(())
     }
     pub(super) fn node(&mut self, id: i64, label_group: i64) -> io::Result<()> {
@@ -295,11 +433,16 @@ impl BodyWriter {
         key: i64,
         value: StorageValueRef<'_>,
     ) -> io::Result<i64> {
-        let rowid = i64::try_from(self.node_property.rows + 1).map_err(|_| {
+        let Some(spool) = &mut self.node_property else {
+            self.node_primary.push(owner, key, value)?;
+            // Compact secondary indexes use the full property key as identity.
+            return Ok(0);
+        };
+        let rowid = i64::try_from(spool.rows + 1).map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidData, "property rowid space exhausted")
         })?;
-        encode_property_record(owner, key, value, &mut self.node_property.record);
-        self.node_property.push_encoded(rowid)?;
+        encode_property_record(owner, key, value, &mut spool.record);
+        spool.push_encoded(rowid)?;
         self.node_primary
             .push(owner, key, StorageValueRef::Integer(rowid))?;
         Ok(rowid)
@@ -315,7 +458,9 @@ impl BodyWriter {
     pub(super) fn flush(&mut self) -> io::Result<()> {
         self.node.flush()?;
         self.edge.flush()?;
-        self.node_property.flush()?;
+        if let Some(spool) = &mut self.node_property {
+            spool.flush()?;
+        }
         self.node_primary.flush()?;
         self.edge_property.flush()?;
         self.node_primary.spool.flush()?;
@@ -326,37 +471,49 @@ impl BodyWriter {
         writer: &mut PageWriter,
     ) -> io::Result<Vec<(&'static str, &'static str, BuiltIndexStatistics)>> {
         self.flush()?;
-        for (root, spool) in [
-            (self.roots[0], &mut self.node),
-            (self.roots[1], &mut self.edge),
-            (self.roots[2], &mut self.node_property),
-        ] {
-            let mut reader = spool.reader()?;
-            writer.table_from(root, &mut reader)?;
-        }
         let mut statistics = Vec::with_capacity(2);
-        for (root, spool, table, index, columns) in [
-            (
-                self.roots[3],
-                &mut self.node_primary.spool,
-                "node_property",
-                "sqlite_autoindex_node_property_1",
-                3,
-            ),
-            (
-                self.roots[4],
-                &mut self.edge_property.spool,
-                "edge_property",
-                "edge_property",
-                2,
-            ),
-        ] {
-            let built = write_primary_index(writer, root, spool, columns)?;
-            if spool.rows != 0 {
-                statistics.push((table, index, built));
-            }
+        for tree in self.trees() {
+            statistics.extend(write_tree(writer, tree)?);
         }
         Ok(statistics)
+    }
+
+    fn trees(&mut self) -> impl Iterator<Item = BodyTree<'_>> {
+        let (primary_root, primary_index, primary_columns) = self
+            .roots
+            .node_primary
+            .map_or((self.roots.node_property, "node_property", 2), |root| {
+                (root, "sqlite_autoindex_node_property_1", 3)
+            });
+        let mapped_slot = self.mapped_slot.as_ref();
+        [
+            Some((self.roots.node, &mut self.node, TreeKind::Table)),
+            Some((
+                self.roots.edge,
+                &mut self.edge,
+                mapped_slot.map_or(TreeKind::Table, TreeKind::MappedEdge),
+            )),
+            self.node_property
+                .as_mut()
+                .map(|spool| (self.roots.node_property, spool, TreeKind::Table)),
+            Some((
+                primary_root,
+                &mut self.node_primary.spool,
+                TreeKind::Primary("node_property", primary_index, primary_columns, None),
+            )),
+            Some((
+                self.roots.edge_property,
+                &mut self.edge_property.spool,
+                TreeKind::Primary(
+                    "edge_property",
+                    "edge_property",
+                    2,
+                    mapped_slot.map(|mapping| mapping.slot),
+                ),
+            )),
+        ]
+        .into_iter()
+        .flatten()
     }
 
     pub(super) fn write_tables_shared(
@@ -364,36 +521,13 @@ impl BodyWriter {
         writer: &PageWriter,
     ) -> io::Result<Vec<(&'static str, &'static str, BuiltIndexStatistics)>> {
         self.flush()?;
-        let trees = [
-            (self.roots[0], &mut self.node, None),
-            (self.roots[1], &mut self.edge, None),
-            (self.roots[2], &mut self.node_property, None),
-            (
-                self.roots[3],
-                &mut self.node_primary.spool,
-                Some(("node_property", "sqlite_autoindex_node_property_1", 3)),
-            ),
-            (
-                self.roots[4],
-                &mut self.edge_property.spool,
-                Some(("edge_property", "edge_property", 2)),
-            ),
-        ];
+        let trees = self.trees();
         std::thread::scope(|scope| {
             let handles: Vec<_> = trees
-                .into_iter()
-                .map(|(root, spool, primary)| {
+                .map(|tree| {
                     scope.spawn(move || {
-                        let mut output = writer.fork_dynamic(root)?;
-                        let statistics = if let Some((table, index, columns)) = primary {
-                            let statistics =
-                                write_primary_index(&mut output, root, spool, columns)?;
-                            (spool.rows != 0).then_some((table, index, statistics))
-                        } else {
-                            let mut reader = spool.reader()?;
-                            output.table_from(root, &mut reader)?;
-                            None
-                        };
+                        let mut output = writer.fork_dynamic(tree.0)?;
+                        let statistics = write_tree(&mut output, tree)?;
                         output.complete()?;
                         Ok::<_, io::Error>(statistics)
                     })
@@ -418,6 +552,116 @@ impl BodyWriter {
     }
 }
 
+pub(super) fn slot_eligible(value: StorageValueRef<'_>, max_bytes: usize) -> bool {
+    match value {
+        StorageValueRef::Null => false,
+        StorageValueRef::Integer(_) | StorageValueRef::Real(_) => true,
+        StorageValueRef::Text(value) => value.len() <= max_bytes,
+        StorageValueRef::Blob(value) => value.len() <= max_bytes,
+    }
+}
+
+fn property_value(record: &[u8]) -> io::Result<StorageValueRef<'_>> {
+    record_values(record)?
+        .nth(2)
+        .transpose()?
+        .ok_or_else(|| invalid("property record has no value"))
+}
+
+struct SlotValues {
+    input: BufReader<File>,
+    slot: EdgeSlot,
+    record: Vec<u8>,
+    next: Option<(i64, usize)>,
+    remaining: u64,
+}
+
+impl SlotValues {
+    fn open(mapping: &MappedSlot) -> io::Result<Self> {
+        Ok(Self {
+            input: BufReader::with_capacity(1024 * 1024, File::open(&mapping.property_path)?),
+            slot: mapping.slot,
+            // 12-byte maximum header, two eight-byte PK fields, then the value.
+            record: vec![0; 12 + 2 * 8 + mapping.slot.max_bytes],
+            next: None,
+            remaining: mapping.slot.rows,
+        })
+    }
+
+    fn next_match(&mut self) -> io::Result<(i64, usize)> {
+        while let Some((owner, length)) = read_frame_header(&mut self.input)? {
+            if length as usize > self.record.len() {
+                self.input.seek_relative(i64::from(length))?;
+                continue;
+            }
+            let record = &mut self.record[..length as usize];
+            self.input.read_exact(record)?;
+            let keys = primary_key(record, 2)?;
+            if keys[1] == self.slot.key
+                && slot_eligible(property_value(record)?, self.slot.max_bytes)
+            {
+                if keys[0] != owner {
+                    return Err(invalid("edge property frame has a different owner"));
+                }
+                return Ok((owner, length as usize));
+            }
+        }
+        Err(invalid(
+            "edge property stream ended before the expected slot count",
+        ))
+    }
+
+    fn for_edge(&mut self, edge: i64) -> io::Result<Option<StorageValueRef<'_>>> {
+        if self.next.is_none() && self.remaining != 0 {
+            self.next = Some(self.next_match()?);
+        }
+        let Some((owner, length)) = self.next else {
+            return Ok(None);
+        };
+        match owner.cmp(&edge) {
+            std::cmp::Ordering::Less => Err(invalid("edge slot owner is missing or duplicated")),
+            std::cmp::Ordering::Greater => Ok(None),
+            std::cmp::Ordering::Equal => {
+                self.next = None;
+                self.remaining -= 1;
+                property_value(&self.record[..length]).map(Some)
+            }
+        }
+    }
+}
+
+struct MappedEdges {
+    edges: RecordReader,
+    values: SlotValues,
+    output: Vec<u8>,
+}
+
+impl RecordSource for MappedEdges {
+    fn next(&mut self) -> io::Result<Option<(i64, &[u8])>> {
+        let Some((id, record)) = self.edges.next_record()? else {
+            if self.values.remaining != 0 {
+                return Err(invalid("edge stream ended before the expected slot count"));
+            }
+            return Ok(None);
+        };
+        let Some(value) = self.values.for_edge(id)? else {
+            // An omitted ALTER TABLE suffix reads as the slot's NULL default.
+            return Ok(Some((id, record)));
+        };
+        let mut fields = record_values(record)?;
+        let mut values = [StorageValueRef::Null; 5];
+        for field in &mut values[..4] {
+            *field = fields
+                .next()
+                .transpose()?
+                .ok_or_else(|| invalid("edge record has too few fields"))?;
+        }
+        values[4] = value;
+        encode_record(&values, &mut self.output);
+        Ok(Some((id, &self.output)))
+    }
+}
+
 fn primary_key(record: &[u8], columns: usize) -> io::Result<[i64; 3]> {
     let mut keys = [0; 3];
     let mut fields = record_values(record)?;
@@ -435,15 +679,25 @@ struct PrimaryRecords<'a> {
     statistics: &'a mut IndexStatistics,
     previous: Option<[i64; 3]>,
     columns: usize,
+    omit: Option<EdgeSlot>,
 }
 
 impl RecordSource for PrimaryRecords<'_> {
     fn next(&mut self) -> io::Result<Option<(i64, &[u8])>> {
-        let witness = self.reader.offset;
-        let Some((_, record)) = self.reader.next_record()? else {
-            return Ok(None);
+        let (witness, keys) = loop {
+            let witness = self.reader.offset;
+            if self.reader.advance()?.is_none() {
+                return Ok(None);
+            }
+            let record = self.reader.current_record();
+            let keys = primary_key(record, self.columns)?;
+            if let Some(slot) = self.omit {
+                if keys[1] == slot.key && slot_eligible(property_value(record)?, slot.max_bytes) {
+                    continue;
+                }
+            }
+            break (witness, keys);
         };
-        let keys = primary_key(record, self.columns)?;
         let changed = match self.previous {
             None => 0,
             Some(previous) => {
@@ -461,7 +715,7 @@ impl RecordSource for PrimaryRecords<'_> {
             .push(changed, witness)
             .map_err(|error| invalid(&error))?;
         self.previous = Some(keys);
-        Ok(Some((0, record)))
+        Ok(Some((0, self.reader.current_record())))
     }
 }
 
@@ -470,9 +724,10 @@ fn write_primary_index(
     root: u32,
     spool: &mut RecordSpool,
     columns: usize,
+    rows: u64,
+    omit: Option<EdgeSlot>,
 ) -> io::Result<BuiltIndexStatistics> {
-    let mut statistics =
-        IndexStatistics::new(columns, 2, spool.rows).map_err(|error| invalid(&error))?;
+    let mut statistics = IndexStatistics::new(columns, 2, rows).map_err(|error| invalid(&error))?;
     let mut reader = spool.reader()?;
     writer.index_from(
         root,
@@ -481,17 +736,19 @@ fn write_primary_index(
             statistics: &mut statistics,
             previous: None,
             columns,
+            omit,
         },
     )?;
     let statistics = statistics.finish().map_err(|error| invalid(&error))?;
     let mut samples = Vec::with_capacity(statistics.samples.len());
     for sample in statistics.samples {
         let mut record = Vec::new();
-        reader.read_witness(sample.witness, &mut record)?;
         if columns == 2 {
             // WITHOUT ROWID table samples contain only the primary-key fields;
-            // its non-key value may be a very large text/blob overflow payload.
-            let keys = primary_key(&record, 2)?;
+            // read the header (at most 12 bytes) and the two integer keys.
+            let mut prefix = [0; 12 + 2 * 8];
+            let length = reader.read_witness_prefix(sample.witness, &mut prefix)?;
+            let keys = primary_key(&prefix[..length], 2)?;
             encode_record(
                 &[
                     StorageValueRef::Integer(keys[0]),
@@ -499,6 +756,8 @@ fn write_primary_index(
                 ],
                 &mut record,
             );
+        } else {
+            reader.read_witness(sample.witness, &mut record)?;
         }
         samples.push(Stat4Record {
             equal: sample.equal,
@@ -719,7 +978,7 @@ mod tests {
         connection
             .execute_batch("DROP TABLE discarded_padding; PRAGMA page_size=16384; VACUUM main;")
             .unwrap();
-        let current_roots = [
+        let [node, edge, node_property, node_primary, edge_property] = [
             "node",
             "edge",
             "node_property",
@@ -735,6 +994,13 @@ mod tests {
                 )
                 .unwrap()
         });
+        let current_roots = BodyRoots {
+            node,
+            edge,
+            node_property,
+            node_primary: Some(node_primary),
+            edge_property,
+        };
         assert_ne!(original_roots, current_roots);
         body.refresh_roots(&connection).unwrap();
         assert_eq!(body.roots, current_roots);
@@ -803,11 +1069,49 @@ mod tests {
     }
 
     #[test]
+    fn owner_spool_bounds_capacity_retained_after_large_values() {
+        let database = Database::new();
+        let spool = RecordSpool::create(&database.0, "test-owner", 8192).unwrap();
+        let mut properties = OwnerProperties::new(spool);
+        let payload = vec![123; 65_536];
+        for owner in [1, 2] {
+            properties
+                .push(owner, 2, StorageValueRef::Blob(&payload))
+                .unwrap();
+            properties
+                .push(owner, 1, StorageValueRef::Integer(owner))
+                .unwrap();
+        }
+        properties.flush().unwrap();
+        assert_eq!(properties.spool.rows, 4);
+        let retained: usize = properties.records.iter().map(Vec::capacity).sum();
+        assert_eq!(properties.retained_bytes, retained);
+        assert!(retained <= 8192);
+    }
+
+    #[test]
     fn packed_primary_statistics_match_full_analyze_with_skewed_keys_and_overflow_values() {
-        for owners in [0, 1, 23, 24, 25, 512, 2048] {
+        let cases = [false, true].into_iter().flat_map(|compact| {
+            [0, 1, 23, 24, 25, 512, 2048]
+                .into_iter()
+                .map(move |owners| (compact, owners))
+        });
+        for (compact, owners) in cases {
             let database = Database::new();
             let connection = Connection::open(&database.0).unwrap();
             connection.execute_batch(SCHEMA).unwrap();
+            let node_index = if compact {
+                connection
+                    .execute_batch(
+                        "DROP TABLE node_property;
+                         CREATE TABLE node_property(node_id INTEGER,key_id INTEGER,value,
+                           PRIMARY KEY(node_id,key_id)) WITHOUT ROWID;",
+                    )
+                    .unwrap();
+                "node_property"
+            } else {
+                "sqlite_autoindex_node_property_1"
+            };
             let mut body = BodyWriter::create(&connection, &database.0, 1024 * 1024).unwrap();
             drop(connection);
             let text = "κόσμοςλ雪".repeat(160);
@@ -870,6 +1174,16 @@ mod tests {
                 assert_eq!(
                     connection
                         .query_row(
+                            "SELECT value FROM node_property WHERE node_id=1 AND key_id=?1",
+                            [i64::MAX],
+                            |row| row.get::<_, Value>(0)
+                        )
+                        .unwrap(),
+                    Value::Text(text.clone())
+                );
+                assert_eq!(
+                    connection
+                        .query_row(
                             "SELECT value FROM edge_property WHERE edge_id=1 AND key_id=?1",
                             [i64::MAX],
                             |row| row.get::<_, Value>(0)
@@ -879,7 +1193,7 @@ mod tests {
                 );
             }
             connection.execute_batch("ANALYZE;").unwrap();
-            for name in ["sqlite_autoindex_node_property_1", "edge_property"] {
+            for name in [node_index, "edge_property"] {
                 let expected_stat = connection
                     .query_row(
                         "SELECT stat FROM sqlite_stat1 WHERE idx=?1",

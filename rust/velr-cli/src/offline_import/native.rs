@@ -502,6 +502,8 @@ impl OfflineImport {
                  PRAGMA temp_store=FILE; PRAGMA locking_mode=EXCLUSIVE; PRAGMA mmap_size=0;",
             )
             .map_err(sql_error)?;
+            #[cfg(feature = "experimental-compact-default")]
+            velr_storage::compact::prepare_import_node_property(&conn).map_err(sql_error)?;
             conn.execute(
                 "ATTACH DATABASE ?1 AS import_ids",
                 [ids_path.to_string_lossy().as_ref()],
@@ -524,6 +526,13 @@ impl OfflineImport {
             ))
             .map_err(sql_error)?;
             conn.execute_batch(IMPORT_SHAPE_SCHEMA).map_err(sql_error)?;
+            #[cfg(feature = "experimental-compact-default")]
+            conn.execute_batch(
+                "CREATE TABLE import_ids.inline_edge_count(
+                   key_id INTEGER PRIMARY KEY,count INTEGER NOT NULL
+                 ) WITHOUT ROWID;",
+            )
+            .map_err(sql_error)?;
             Ok(conn)
         })();
         let conn = match setup {
@@ -947,6 +956,11 @@ impl OfflineImport {
         let mut counts = ImportCounts::default();
         let mut properties = 0;
         let mut batch_shapes = BatchShapeCounts::new(spec.properties.len());
+        #[cfg(feature = "experimental-compact-default")]
+        let mut inline_counts = self
+            .body
+            .is_some()
+            .then(|| vec![0i64; spec.properties.len()]);
         for (row_number, row) in rows.enumerate() {
             let start_id = external_id(row, &spec.start_columns, start_id_type)?;
             let end_id = external_id(row, &spec.end_columns, end_id_type)?;
@@ -1021,6 +1035,13 @@ impl OfflineImport {
                     if let Some(body) = &mut self.body {
                         body.edge_property(edge_id, *key, row[property.column])
                             .map_err(|error| format!("write edge property record: {error}"))?;
+                        #[cfg(feature = "experimental-compact-default")]
+                        if let Some(inline_counts) = &mut inline_counts {
+                            inline_counts[slot] += i64::from(bulk_body::slot_eligible(
+                                row[property.column],
+                                velr_storage::compact::SLOT_MAX_PAYLOAD_BYTES,
+                            ));
+                        }
                     } else {
                         property_insert
                             .execute(params![edge_id, key, SqlCell(row[property.column])])
@@ -1047,6 +1068,20 @@ impl OfflineImport {
             counts.relationships += 1;
         }
         batch_shapes.flush(conn, &mut self.shape_counts)?;
+        #[cfg(feature = "experimental-compact-default")]
+        if let Some(inline_counts) = inline_counts {
+            let mut update = conn
+                .prepare_cached(
+                    "INSERT INTO import_ids.inline_edge_count(key_id,count) VALUES (?1,?2)
+                     ON CONFLICT(key_id) DO UPDATE SET count=count+excluded.count",
+                )
+                .map_err(sql_error)?;
+            for (key, count) in property_keys.iter().zip(inline_counts) {
+                if count > 0 {
+                    update.execute(params![key, count]).map_err(sql_error)?;
+                }
+            }
+        }
         drop(actual_lookup);
         drop(id_lookup);
         drop(property_insert);
@@ -1060,12 +1095,38 @@ impl OfflineImport {
 
     /// Finalizes secondary indexes, planner statistics and normal storage settings;
     /// checks the completed database and closes every file before returning.
-    pub fn finish(mut self) -> Result<ImportReport, String> {
+    pub fn finish(self) -> Result<ImportReport, String> {
+        self.finish_with_options(false, None)
+            .map(|(report, _)| report)
+    }
+
+    pub(super) fn finish_with_options(
+        mut self,
+        vacuum: bool,
+        inline_edge_properties: Option<&[String]>,
+    ) -> Result<(ImportReport, Vec<String>), String> {
         self.require_healthy()?;
+        #[cfg(not(feature = "experimental-compact-default"))]
+        if inline_edge_properties.is_some_and(|keys| !keys.is_empty()) {
+            return Err("inline edge properties require schema 11".into());
+        }
         self.configure_bulk_pages()?;
         let profile = std::env::var_os("VELR_IMPORT_PROFILE").is_some();
         let mut phase_started = Instant::now();
         let mut body = self.body.take();
+        #[cfg(feature = "experimental-compact-default")]
+        let prepared_edge = {
+            let selection = prepare_edge_slot(
+                self.conn.as_ref().unwrap(),
+                body.as_mut(),
+                self.counts.relationships,
+                inline_edge_properties,
+            )?;
+            if body.is_some() {
+                profile_phase(profile, "choose packed edge slot", &mut phase_started);
+            }
+            selection
+        };
         // Endpoint lookup has ended; release its directories before sorting.
         self.integer_ids.clear();
         self.id_cache.entries = HashMap::new();
@@ -1121,6 +1182,11 @@ impl OfflineImport {
             .map_err(|err| format!("cannot remove import ID map: {err}"))?;
         // Retain the private database's journal-free settings through index builds.
         // The schema prefix sets production WAL settings otherwise.
+        // Install the compact definitions first so the wide CREATE IF NOT EXISTS
+        // statements skip them even when SQLite builds the indexes.
+        #[cfg(feature = "experimental-compact-default")]
+        schema_contract::ensure_compact_indexes(conn)
+            .map_err(|error| phase_error("build compact identity indexes", error))?;
         let table_schema = &PG_SCHEMA[PG_SCHEMA.find("CREATE TABLE").unwrap()..];
         conn.execute_batch(table_schema)
             .map_err(|error| phase_error("build schema and indexes", error))?;
@@ -1143,7 +1209,43 @@ impl OfflineImport {
         conn.execute_batch("PRAGMA foreign_keys=ON;")
             .map_err(|error| phase_error("analyze and restore foreign keys", error))?;
         profile_phase(profile, "ANALYZE", &mut phase_started);
-        schema_contract::validate_finished_schema(conn)?;
+        #[cfg(feature = "experimental-compact-default")]
+        let mapped_edge = matches!(
+            prepared_edge,
+            velr_storage::compact::ImportEdgeSlot::Prepared(Some(_))
+                | velr_storage::compact::ImportEdgeSlot::PreparedExplicit(Some(_))
+        );
+        #[cfg(not(feature = "experimental-compact-default"))]
+        let mapped_edge = false;
+        schema_contract::validate_finished_schema(conn, mapped_edge)?;
+        #[cfg(feature = "experimental-compact-default")]
+        {
+            convert_to_compact_layout(conn, prepared_edge, profile)
+                .map_err(|error| phase_error("compact storage conversion", error))?;
+            profile_phase(profile, "compact storage conversion", &mut phase_started);
+        }
+        if vacuum {
+            vacuum_import(conn, profile).map_err(|error| phase_error("vacuum", error))?;
+            profile_phase(profile, "compact vacuum", &mut phase_started);
+        }
+        #[cfg(feature = "experimental-compact-default")]
+        let mapping = {
+            conn.execute_batch(
+                "ANALYZE main.__vrs_adapter_identity;
+                 ANALYZE main.__vrs_inline_layout;
+                 ANALYZE main.__vrs_inline_map;",
+            )
+            .and_then(|()| velr_storage::mapped_slots::verify_schema_fingerprint(conn))
+            .map_err(|error| phase_error("compact final metadata validation", error))?;
+            profile_phase(
+                profile,
+                "compact final metadata validation",
+                &mut phase_started,
+            );
+            velr_storage::compact::inline_edge_properties(conn).map_err(sql_error)?
+        };
+        #[cfg(not(feature = "experimental-compact-default"))]
+        let mapping = Vec::new();
         conn.flush_prepared_statement_cache();
         self.conn
             .take()
@@ -1161,9 +1263,19 @@ impl OfflineImport {
         // is enabled and the immutable staging file can be published.
         let checkpoint = Connection::open(&self.database_path)
             .map_err(|error| phase_error("open checkpoint connection", error))?;
+        let synchronous = if cfg!(feature = "experimental-compact-default") {
+            "FULL"
+        } else {
+            "NORMAL"
+        };
         checkpoint
-            .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA journal_mode=WAL;")
+            .execute_batch(&format!(
+                "PRAGMA synchronous={synchronous}; PRAGMA journal_mode=WAL;"
+            ))
             .map_err(|error| phase_error("restore production journaling", error))?;
+        #[cfg(feature = "experimental-compact-default")]
+        velr_storage::configure_wal_retention(&checkpoint)
+            .map_err(|error| phase_error("configure WAL retention", error))?;
         let busy: i64 = checkpoint
             .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
             .map_err(|error| phase_error("checkpoint", error))?;
@@ -1179,11 +1291,14 @@ impl OfflineImport {
             "production journaling, close and checkpoint",
             &mut phase_started,
         );
-        Ok(ImportReport {
-            counts: self.counts,
-            properties: self.properties,
-            elapsed_millis: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-        })
+        Ok((
+            ImportReport {
+                counts: self.counts,
+                properties: self.properties,
+                elapsed_millis: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            },
+            mapping,
+        ))
     }
 
     fn materialize_body(
@@ -1392,6 +1507,105 @@ impl Drop for OfflineImport {
         }
         let _ = fs::remove_file(&self.ids_path);
     }
+}
+
+#[cfg(feature = "experimental-compact-default")]
+fn prepare_edge_slot(
+    conn: &Connection,
+    body: Option<&mut bulk_body::BodyWriter>,
+    edge_count: u64,
+    requested: Option<&[String]>,
+) -> Result<velr_storage::compact::ImportEdgeSlot, String> {
+    use velr_storage::compact::{self, ImportEdgeSlot};
+
+    let explicit = requested
+        .map(|keys| {
+            compact::validate_inline_edge_properties(keys)?
+                .map(|name| compact::resolve_inline_edge_property(conn, name))
+                .transpose()
+        })
+        .transpose()
+        .map_err(sql_error)?;
+    let Some(body) = body else {
+        return Ok(explicit.map_or(ImportEdgeSlot::SelectWithSql, ImportEdgeSlot::Explicit));
+    };
+    let winner: Option<(i64, u64)> = match explicit {
+        None => {
+            let edge_count =
+                i64::try_from(edge_count).map_err(|_| "internal relationship count exceeds i64")?;
+            conn.query_row(
+                "SELECT key_id,count FROM import_ids.inline_edge_count WHERE count>?1
+                 ORDER BY count DESC,key_id LIMIT 1",
+                [edge_count / 2],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(sql_error)?
+        }
+        Some(Some(key)) => {
+            let rows = conn.query_row(
+                "SELECT coalesce((SELECT count FROM import_ids.inline_edge_count WHERE key_id=?1), 0)",
+                [key],
+                |row| row.get(0),
+            ).map_err(sql_error)?;
+            Some((key, rows))
+        }
+        Some(None) => None,
+    };
+    if let Some((key, rows)) = winner {
+        compact::prepare_import_edge_slot(conn, key).map_err(sql_error)?;
+        body.prepare_edge_slot(key, rows, compact::SLOT_MAX_PAYLOAD_BYTES);
+    }
+    let key = winner.map(|(key, _)| key);
+    Ok(if explicit.is_some() {
+        ImportEdgeSlot::PreparedExplicit(key)
+    } else {
+        ImportEdgeSlot::Prepared(key)
+    })
+}
+
+#[cfg(feature = "experimental-compact-default")]
+fn convert_to_compact_layout(
+    conn: &Connection,
+    prepared_edge: velr_storage::compact::ImportEdgeSlot,
+    profile: bool,
+) -> rusqlite::Result<()> {
+    use rusqlite::{Transaction, TransactionBehavior};
+
+    let mut started = Instant::now();
+    // The packed writer's journal-free settings end before this conversion.
+    // A private rollback journal avoids growing a WAL while rebuilding tables.
+    conn.execute_batch("PRAGMA main.journal_mode=DELETE; PRAGMA main.synchronous=FULL;")?;
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    profile_phase(profile, "compact journal and begin", &mut started);
+    velr_storage::compact::finish_prepared_import(&tx, prepared_edge, |phase| {
+        profile_phase(profile, phase, &mut started);
+    })?;
+    velr_storage::mapped_slots::prepare_persistent(&tx, true)?;
+    profile_phase(profile, "compact admission", &mut started);
+    tx.commit()?;
+    profile_phase(profile, "compact commit", &mut started);
+    Ok(())
+}
+
+fn vacuum_import(conn: &Connection, profile: bool) -> rusqlite::Result<()> {
+    let vacuum_pages = || -> rusqlite::Result<(u64, u64, u64)> {
+        Ok((
+            conn.pragma_query_value(Some("main"), "page_size", |row| row.get(0))?,
+            conn.pragma_query_value(Some("main"), "page_count", |row| row.get(0))?,
+            conn.pragma_query_value(Some("main"), "freelist_count", |row| row.get(0))?,
+        ))
+    };
+    let before = if profile { Some(vacuum_pages()?) } else { None };
+    // Reclaim free pages before validating and publishing.
+    conn.execute_batch("VACUUM main;")?;
+    if let Some((size, before_pages, before_free)) = before {
+        let (_, after_pages, after_free) = vacuum_pages()?;
+        eprintln!(
+            "offline import compact vacuum pages: {size} {before_pages} {before_free} {after_pages} {after_free}"
+        );
+    }
+    Ok(())
 }
 
 fn sql_error(error: rusqlite::Error) -> String {
@@ -1814,6 +2028,27 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.directory);
         }
+    }
+
+    fn open_logical_properties(database: &TestDatabase) -> Connection {
+        let conn = Connection::open(&database.path).unwrap();
+        #[cfg(feature = "experimental-compact-default")]
+        {
+            // Reconstruct the logical property stream without opening a
+            // query runtime, so the importer unit checks remain independent.
+            let mut view = String::from(
+                "CREATE TEMP VIEW edge_property AS
+                 SELECT edge_id,key_id,value FROM main.__vrs_edge_property",
+            );
+            for (slot, key) in velr_storage::mapped_slots::slot_mappings(&conn).unwrap() {
+                view.push_str(&format!(
+                    " UNION ALL SELECT id,{key},__vrs_p{slot}
+                     FROM main.edge WHERE __vrs_p{slot} IS NOT NULL"
+                ));
+            }
+            conn.execute_batch(&view).unwrap();
+        }
+        conn
     }
 
     fn nodes(group: &str, kind: ImportIdType) -> NodeImportSpec {
@@ -2324,7 +2559,7 @@ mod tests {
         let report = import.finish().unwrap();
         assert_eq!(report.counts.nodes, 2);
         assert_eq!(report.counts.relationships, 1);
-        let conn = Connection::open(&database.path).unwrap();
+        let conn = open_logical_properties(&database);
         assert_eq!(conn.query_row("SELECT value FROM node_property p JOIN key_dict k ON p.key_id=k.id WHERE k.name='name' AND node_id=1", [], |row| row.get::<_,String>(0)).unwrap(), "Anonymous");
         assert_eq!(conn.query_row("SELECT value FROM node_property p JOIN key_dict k ON p.key_id=k.id WHERE k.name='active'", [], |row| row.get::<_,Vec<u8>>(0)).unwrap(), saved_active);
         assert_eq!(
@@ -2383,6 +2618,129 @@ mod tests {
         assert!(!imported[1].is_empty());
         conn.execute_batch("ANALYZE;").unwrap();
         assert_eq!(imported, snapshot());
+    }
+
+    #[cfg(feature = "experimental-compact-default")]
+    #[test]
+    fn packed_edge_slots_match_sql_for_ties_boundary_values_and_strict_majorities() {
+        use rusqlite::types::Value;
+
+        let fixture = |budget, kind, tie: bool| {
+            let database = TestDatabase::new();
+            let mut import = OfflineImport::create(&database.path, budget).unwrap();
+            import
+                .append_nodes(
+                    &nodes("people", kind),
+                    &[
+                        vec![StorageValue::Integer(1), text("first")],
+                        vec![StorageValue::Integer(2), text("second")],
+                    ],
+                )
+                .unwrap();
+            let mut spec = relationships("people", kind);
+            spec.skip_bad_relationships = true;
+            spec.properties = vec![
+                ImportPropertyColumn {
+                    column: 2,
+                    name: "winning-key".into(),
+                },
+                ImportPropertyColumn {
+                    column: 3,
+                    name: "other-key".into(),
+                },
+            ];
+            let small_blob =
+                encode_property_value(&PropertyValue::List(ListValue::Int64(vec![Some(8), None])))
+                    .unwrap();
+            let values = [
+                text(&"é".repeat(64)),
+                text(&format!("{}\0", "x".repeat(127))),
+                StorageValue::Integer(i64::MIN),
+                StorageValue::Real(-0.5),
+                if tie { small_blob } else { StorageValue::Null },
+                text(&format!("{}x", "é".repeat(64))),
+                text(&"q".repeat(20_000)),
+                StorageValue::Null,
+            ];
+            let mut rows = values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    vec![
+                        StorageValue::Integer(1),
+                        StorageValue::Integer(2),
+                        value,
+                        if index < 4 + usize::from(tie) {
+                            StorageValue::Integer(index as i64)
+                        } else {
+                            StorageValue::Null
+                        },
+                    ]
+                })
+                .collect::<Vec<_>>();
+            rows.push(vec![
+                StorageValue::Integer(1),
+                StorageValue::Integer(999),
+                StorageValue::Integer(1),
+                StorageValue::Integer(1),
+            ]);
+            for batch in rows.chunks(3) {
+                import.append_relationships(&spec, batch).unwrap();
+            }
+            let report = import.finish().unwrap();
+            assert_eq!(report.counts.relationships, 8);
+            assert_eq!(report.counts.skipped_relationships, 1);
+            database
+        };
+
+        let snapshot = |conn: &Connection, sql: &str| {
+            let mut stmt = conn.prepare(sql).unwrap();
+            let columns = stmt.column_count();
+            let rows = stmt
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get::<_, Value>(column))
+                        .collect::<rusqlite::Result<Vec<_>>>()
+                })
+                .unwrap();
+            rows.collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        for tie in [true, false] {
+            let sql = fixture(32 * 1024 * 1024, ImportIdType::Actual, tie);
+            let sql = open_logical_properties(&sql);
+            for memory in [32 * 1024 * 1024, 256 * 1024 * 1024] {
+                let packed = fixture(memory, ImportIdType::Integer, tie);
+                let packed = open_logical_properties(&packed);
+                let mapping = velr_storage::mapped_slots::slot_mappings(&packed).unwrap();
+                if tie {
+                    assert_eq!(mapping, [(0, 2)]);
+                    assert_eq!(
+                        snapshot(
+                            &packed,
+                            "SELECT edge_id,length(CAST(value AS BLOB))
+                             FROM main.__vrs_edge_property WHERE key_id=2 ORDER BY edge_id",
+                        ),
+                        [
+                            vec![Value::Integer(6), Value::Integer(129)],
+                            vec![Value::Integer(7), Value::Integer(20_000)],
+                        ]
+                    );
+                } else {
+                    assert!(mapping.is_empty());
+                }
+                for query in [
+                    "SELECT type,name,tbl_name,sql FROM main.sqlite_schema ORDER BY type,name",
+                    "SELECT mapping_sha256 FROM main.__vrs_adapter_identity",
+                    "SELECT * FROM main.edge ORDER BY id",
+                    "SELECT edge_id,key_id,typeof(value),value FROM temp.edge_property ORDER BY edge_id,key_id",
+                    "SELECT tbl,idx,stat FROM main.sqlite_stat1 ORDER BY tbl,idx,stat",
+                    "SELECT tbl,idx,neq,nlt,ndlt,sample FROM main.sqlite_stat4 ORDER BY tbl,idx,neq,nlt,ndlt,hex(sample)",
+                ] {
+                    assert_eq!(snapshot(&packed, query), snapshot(&sql, query), "{query}");
+                }
+                assert_planner_statistics_match_full_analyze(&packed);
+            }
+        }
     }
 
     fn exercise_packed_secondary_indexes(real_numeric: bool, memory_budget: usize) {
@@ -3050,7 +3408,7 @@ mod tests {
         assert_eq!(report.counts.relationships, 160);
         assert_eq!(report.counts.skipped_nodes, 4);
         assert_eq!(report.counts.skipped_relationships, 2);
-        let conn = Connection::open(&database.path).unwrap();
+        let conn = open_logical_properties(&database);
         let snapshot = |conn: &Connection| {
             [
                 "SELECT * FROM graph_shape_node_scope ORDER BY 1",

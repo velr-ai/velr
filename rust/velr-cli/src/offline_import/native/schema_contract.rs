@@ -1,17 +1,18 @@
-//! Reviewed storage contract for imports that bypass ordinary Cypher writes.
+//! Reviewed staging contract for imports that bypass ordinary Cypher writes.
 //!
 //! Schema initialization still executes the production `PG_SCHEMA`. The packed
 //! record encoders, sorted index keys and graph-shape aggregates nevertheless
 //! depend on its column order, rowid/primary-key layout and metadata semantics.
+//! Compact imports convert this checked stage before publication.
 //! A version check alone cannot catch edits made without a version bump. Pin the
 //! complete schema, normal graph-shape backfill and trigger-removal SQL so any
 //! change requires an explicit importer review before creating a staging file.
 //!
-//! When changing the production schema:
+//! When changing the packed staging schema:
 //! 1. Review the table/index layouts against `bulk_body` and `bulk_indexes`, and
 //!    the graph-shape definitions against `IMPORT_SHAPE_FINISH`.
 //! 2. Update these writers and aggregates when their storage contract changes.
-//! 3. Update both reviewed constants below alongside the reviewed implementation.
+//! 3. Update the affected reviewed constants alongside the reviewed implementation.
 //!    Never update them merely to silence the rejection.
 //! 4. Before merging, run the importer schema/metadata equivalence and post-import
 //!    mutation E2E tests against ordinary Velr/Cypher creation. The rejection
@@ -20,14 +21,26 @@
 //! The fingerprint deliberately includes formatting/comments: even edits that
 //! retain schema version 9 cannot silently opt this writer into a new contract.
 
+use rusqlite::Connection;
+use std::sync::OnceLock;
+#[cfg(feature = "experimental-compact-default")]
+use velr_storage::compact::{narrow_identity_index_sql, prepare_import_node_property};
 use velr_storage::{
     CURRENT_SCHEMA_VERSION, GRAPH_SHAPE_BACKFILL, GRAPH_SHAPE_TRIGGER_DROP_SQL, PG_SCHEMA,
 };
-use rusqlite::Connection;
-use std::sync::OnceLock;
 
 const REVIEWED_SCHEMA_VERSION: i32 = 9;
 const REVIEWED_SCHEMA_FINGERPRINT: u64 = 0x7a3a_f76b_087a_dafe;
+#[cfg(feature = "experimental-compact-default")]
+const COMPACT_INDEXES: [&str; 5] = [
+    "idx_node_label_group",
+    "idx_edge_from_type_to_id",
+    "idx_edge_to_type_from_id",
+    "idx_edge_type_from_to_id",
+    "idx_edge_type_to_from_id",
+];
+#[cfg(feature = "experimental-compact-default")]
+const REVIEWED_COMPACT_INDEX_FINGERPRINT: u64 = 0x43d2_8a40_4cc8_ff0f;
 
 pub(super) fn ensure_reviewed_schema() -> Result<(), String> {
     validate_reviewed_schema(
@@ -35,7 +48,60 @@ pub(super) fn ensure_reviewed_schema() -> Result<(), String> {
         PG_SCHEMA,
         GRAPH_SHAPE_BACKFILL,
         GRAPH_SHAPE_TRIGGER_DROP_SQL,
-    )
+    )?;
+    #[cfg(feature = "experimental-compact-default")]
+    {
+        let sql = COMPACT_INDEXES
+            .iter()
+            .copied()
+            .map(compact_index_sql)
+            .collect::<rusqlite::Result<String>>()
+            .map_err(|error| error.to_string())?;
+        let actual = schema_fingerprint(&sql, "", "");
+        if actual != REVIEWED_COMPACT_INDEX_FINGERPRINT {
+            return Err(format!(
+                "compact identity indexes changed without an offline importer review \
+                 (reviewed fingerprint {REVIEWED_COMPACT_INDEX_FINGERPRINT:#018x}, \
+                 actual {actual:#018x}); review the packed index records and statistics"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "experimental-compact-default")]
+fn compact_index_sql(name: &str) -> rusqlite::Result<&'static str> {
+    narrow_identity_index_sql(name).ok_or_else(|| {
+        rusqlite::Error::InvalidParameterName(format!("missing compact import index {name}"))
+    })
+}
+
+/// Create any compact roots that SQLite must build instead of the packed writer.
+/// The canonical DDL leaves already-packed roots and their statistics intact.
+#[cfg(feature = "experimental-compact-default")]
+pub(super) fn ensure_compact_indexes(conn: &Connection) -> rusqlite::Result<()> {
+    for name in COMPACT_INDEXES {
+        conn.execute_batch(compact_index_sql(name)?)?;
+    }
+    Ok(())
+}
+
+fn reference_stage() -> rusqlite::Result<Connection> {
+    let normal = velr_storage::open_in_memory_database()?;
+    #[cfg(feature = "experimental-compact-default")]
+    {
+        prepare_import_node_property(&normal)?;
+        for name in ["idx_np_keyid_node", "idx_np_key_num", "idx_np_key_txt12"] {
+            normal.execute_batch(
+                canonical_index_sql(name).map_err(rusqlite::Error::InvalidParameterName)?,
+            )?;
+        }
+        for name in COMPACT_INDEXES {
+            normal.execute_batch(&format!("DROP INDEX {name};"))?;
+        }
+        ensure_compact_indexes(&normal)?;
+    }
+    Ok(normal)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -69,12 +135,12 @@ fn schema_objects(conn: &Connection) -> Result<Vec<SchemaObject>, String> {
         .map_err(|error| format!("cannot inspect finished Velr schema: {error}"))
 }
 
-/// Check every persistent schema object against the ordinary runtime initializer
+/// Check every persistent schema object against the reviewed staging layout
 /// before publishing an import. Root page numbers vary by construction order;
 /// ANALYZE also adds SQLite-owned statistics tables. Neither changes the Velr
 /// schema contract, so only those physical/statistics differences are excluded.
 /// This reads the small catalog, never the imported graph tables.
-pub(super) fn validate_finished_schema(conn: &Connection) -> Result<(), String> {
+pub(super) fn validate_finished_schema(conn: &Connection, mapped_edge: bool) -> Result<(), String> {
     let version: i32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(|error| format!("cannot inspect finished Velr schema version: {error}"))?;
@@ -84,9 +150,28 @@ pub(super) fn validate_finished_schema(conn: &Connection) -> Result<(), String> 
         ));
     }
     static NORMAL_SCHEMA: OnceLock<Result<Vec<SchemaObject>, String>> = OnceLock::new();
-    let expected = NORMAL_SCHEMA.get_or_init(|| {
-        let normal = velr_storage::open_in_memory_database()
+    static MAPPED_SCHEMA: OnceLock<Result<Vec<SchemaObject>, String>> = OnceLock::new();
+    let cache = if mapped_edge {
+        &MAPPED_SCHEMA
+    } else {
+        &NORMAL_SCHEMA
+    };
+    let expected = cache.get_or_init(|| {
+        let normal = reference_stage()
             .map_err(|error| format!("cannot initialize reference Velr schema: {error}"))?;
+        if mapped_edge {
+            #[cfg(feature = "experimental-compact-default")]
+            {
+                normal
+                    .execute("INSERT INTO key_dict(id,name) VALUES(1,'staging-slot')", [])
+                    .and_then(|_| velr_storage::compact::prepare_import_edge_slot(&normal, 1))
+                    .map_err(|error| {
+                        format!("cannot initialize reference Velr edge slot: {error}")
+                    })?;
+            }
+            #[cfg(not(feature = "experimental-compact-default"))]
+            return Err("mapped edge requires the compact import schema".into());
+        }
         schema_objects(&normal)
     });
     let expected = expected.as_ref().map_err(Clone::clone)?;
@@ -169,10 +254,13 @@ const fn schema_fingerprint(schema: &str, backfill: &str, dropped_triggers: &str
     hash
 }
 
-/// Use production DDL for packed index roots, rather than maintaining a second
-/// set of CREATE INDEX statements. The reviewed contract above also covers the
-/// expressions/predicates that the corresponding sorted-key encoders assume.
+/// Use production DDL for packed index roots. The reviewed contract above also
+/// covers the expressions and predicates that the sorted-key encoders assume.
 pub(super) fn canonical_index_sql(name: &str) -> Result<&'static str, String> {
+    #[cfg(feature = "experimental-compact-default")]
+    if COMPACT_INDEXES.contains(&name) {
+        return compact_index_sql(name).map_err(|error| error.to_string());
+    }
     let needle = format!("CREATE INDEX IF NOT EXISTS {name}");
     let start = PG_SCHEMA
         .find(&needle)
@@ -290,10 +378,10 @@ mod tests {
 
     #[test]
     fn finished_schema_matches_ordinary_runtime_with_optional_statistics() {
-        let conn = velr_storage::open_in_memory_database().unwrap();
-        validate_finished_schema(&conn).unwrap();
+        let conn = reference_stage().unwrap();
+        validate_finished_schema(&conn, false).unwrap();
         conn.execute_batch("ANALYZE;").unwrap();
-        validate_finished_schema(&conn).unwrap();
+        validate_finished_schema(&conn, false).unwrap();
     }
 
     #[test]
@@ -317,9 +405,9 @@ mod tests {
                 "unexpected table import_staging_leak",
             ),
         ] {
-            let conn = velr_storage::open_in_memory_database().unwrap();
+            let conn = reference_stage().unwrap();
             conn.execute_batch(mutation).unwrap();
-            let error = validate_finished_schema(&conn).unwrap_err();
+            let error = validate_finished_schema(&conn, false).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
     }

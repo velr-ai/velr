@@ -1,5 +1,5 @@
 use super::{Error, Result};
-use std::{fs, path::PathBuf};
+use std::{fs, io::Cursor, path::PathBuf};
 use velr_cli::offline_import::ImportIdType;
 
 #[path = "manifest.rs"]
@@ -10,6 +10,7 @@ pub const HELP: &str = r#"Velr offline importer (Neo4j-compatible CSV input)
 Usage: velr-admin import <database-file> [OPTIONS] <csv-file>...
        velr-admin import <database-file> --manifest <import.toml> [OPTIONS]
        velr-admin database import full [OPTIONS] <database-file>
+       velr-admin database create <database-file> [--inline-edge-properties=<CSV>]
 
   <csv-file>...                         Discover node/relationship headers
   --manifest=<path>                     File groups and CSV settings in TOML
@@ -34,6 +35,9 @@ Usage: velr-admin import <database-file> [OPTIONS] <csv-file>...
   --memory=<size>                      Alias for --max-off-heap-memory
   --read-buffer-size=<size>             Input buffer and largest field (default 4M)
   --overwrite-destination[=true|false]  Replace a closed existing database
+  --vacuum[=true|false]                 Reclaim unused pages after import (default false)
+  --inline-edge-properties=<CSV>       Select one exact property name across all relationship types
+  --no-inline-edge-properties          Leave inline edge properties disabled for this import
   --path-pattern-style=regex|glob|none  File matching (default regex)
   --input-encoding=UTF-8
   --input-type=csv
@@ -53,6 +57,11 @@ Manifest paths are relative to the manifest; CLI settings override manifest
 settings. A manifest cannot be combined with positional CSVs or source groups.
 Files in each group are concatenated; only the first file supplies a header.
 Imports use a private fresh database and publish only after finalization.
+Imports select a property automatically when values fit inline on more than half
+of all relationships. A CLI selection or opt-out overrides the manifest's list.
+Database create leaves inline edge properties disabled unless a name is supplied.
+The selection persists on reopen. Values too large to inline still use ordinary
+Cypher reads and writes.
 Neo4j storage/configuration, cloud and Parquet options produce explicit errors.
 "#;
 
@@ -96,6 +105,8 @@ pub struct Options {
     pub memory_bytes: u64,
     pub buffer_bytes: usize,
     pub overwrite: bool,
+    pub vacuum: bool,
+    pub inline_edge_properties: Option<Vec<String>>,
     pub pattern_style: PatternStyle,
     pub verbose: bool,
     pub normalize_types: bool,
@@ -128,6 +139,8 @@ impl Default for Options {
             memory_bytes: 512 * 1024 * 1024,
             buffer_bytes: 4 * 1024 * 1024,
             overwrite: false,
+            vacuum: false,
+            inline_edge_properties: None,
             pattern_style: PatternStyle::Regex,
             verbose: false,
             normalize_types: true,
@@ -137,6 +150,89 @@ impl Default for Options {
 
 pub fn parse(args: Vec<String>) -> Result<Option<Options>> {
     parse_inner(args, cfg!(windows))
+}
+
+pub(super) fn parse_create(args: Vec<String>) -> Result<Option<(PathBuf, Vec<String>)>> {
+    let args = expand_args(args, 0, cfg!(windows))?;
+    let mut args = args.into_iter().peekable();
+    let mut destination = None;
+    let mut keys = None;
+    let mut positional = false;
+    while let Some(arg) = args.next() {
+        if !positional {
+            match arg.as_str() {
+                "--help" | "-h" => return Ok(None),
+                "--" => {
+                    positional = true;
+                    continue;
+                }
+                _ => {}
+            }
+            let (name, inline) = arg
+                .split_once('=')
+                .map_or((arg.as_str(), None), |(name, value)| (name, Some(value)));
+            if name == "--inline-edge-properties" {
+                if keys.is_some() {
+                    return Err(Error(format!("{name} may only be supplied once")));
+                }
+                let value = match inline {
+                    Some(value) => value.to_owned(),
+                    None => args
+                        .next_if(|value| !value.starts_with("--"))
+                        .ok_or_else(|| Error(format!("{name} requires a value")))?,
+                };
+                keys = Some(parse_inline_edge_properties(&value)?);
+                continue;
+            }
+            if arg.starts_with('-')
+                || (cfg!(windows) && velr_cli::arguments::is_windows_style_flag(&arg))
+            {
+                return Err(Error(format!(
+                    "unsupported option {arg}; use --help for usage"
+                )));
+            }
+        }
+        if destination.replace(PathBuf::from(&arg)).is_some() {
+            return Err(Error(format!("unexpected positional argument '{arg}'")));
+        }
+    }
+    let destination = destination
+        .filter(|path| !path.as_os_str().is_empty() && path != std::path::Path::new(":memory:"))
+        .ok_or_else(|| Error("a destination database file is required".into()))?;
+    Ok(Some((destination, keys.unwrap_or_default())))
+}
+
+pub(super) fn validate_inline_edge_properties(keys: &[String]) -> Result<()> {
+    #[cfg(feature = "experimental-compact-default")]
+    velr_storage::compact::validate_inline_edge_properties(keys)
+        .map_err(|error| Error(error.to_string()))?;
+    #[cfg(not(feature = "experimental-compact-default"))]
+    if !keys.is_empty() {
+        return Err(Error("inline edge properties require schema 11".into()));
+    }
+    Ok(())
+}
+
+fn parse_inline_edge_properties(value: &str) -> Result<Vec<String>> {
+    let mut reader = super::csv::CsvReader::for_header(
+        Box::new(Cursor::new(value.as_bytes().to_vec())),
+        &Options::default(),
+    );
+    let parse_error = |error: Error| Error(format!("--inline-edge-properties: {error}"));
+    let fields = reader.next().map_err(parse_error)?.ok_or_else(|| {
+        Error("--inline-edge-properties requires a nonempty property name".into())
+    })?;
+    if reader.next().map_err(parse_error)?.is_some() {
+        return Err(Error(
+            "--inline-edge-properties expects one CSV record".into(),
+        ));
+    }
+    let keys: Vec<_> = fields
+        .into_iter()
+        .map(|cell| cell.text.into_owned())
+        .collect();
+    validate_inline_edge_properties(&keys)?;
+    Ok(keys)
 }
 
 fn parse_inner(args: Vec<String>, windows_paths: bool) -> Result<Option<Options>> {
@@ -155,7 +251,8 @@ fn parse_inner(args: Vec<String>, windows_paths: bool) -> Result<Option<Options>
         3
     } else {
         return Err(Error(
-            "expected 'import' or 'database import full'; use --help for usage".into(),
+            "expected 'import', 'database import full' or 'database create'; use --help for usage"
+                .into(),
         ));
     };
     let mut destination = PathBuf::new();
@@ -192,6 +289,13 @@ fn parse_inner(args: Vec<String>, windows_paths: bool) -> Result<Option<Options>
             Some((n, v)) => (n, Some(v)),
             None => (arg.as_str(), None),
         };
+        if name == "--no-inline-edge-properties" {
+            if inline.is_some() {
+                return Err(Error(format!("{name} does not take a value")));
+            }
+            settings.push((name.to_owned(), String::new()));
+            continue;
+        }
         let is_bool = matches!(
             name,
             "--ignore-empty-strings"
@@ -204,6 +308,7 @@ fn parse_inner(args: Vec<String>, windows_paths: bool) -> Result<Option<Options>
                 | "--skip-bad-relationships"
                 | "--skip-bad-entries-logging"
                 | "--overwrite-destination"
+                | "--vacuum"
                 | "--normalize-types"
                 | "--strict"
                 | "--verbose"
@@ -237,6 +342,21 @@ fn parse_inner(args: Vec<String>, windows_paths: bool) -> Result<Option<Options>
         } else {
             settings.push((name.to_owned(), value));
         }
+    }
+    if settings
+        .iter()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "--inline-edge-properties" | "--no-inline-edge-properties"
+            )
+        })
+        .count()
+        > 1
+    {
+        return Err(Error(
+            "use one --inline-edge-properties list or --no-inline-edge-properties".into(),
+        ));
     }
     if manifest_path.is_some()
         && (!inputs.is_empty()
@@ -318,6 +438,11 @@ fn apply_setting(opts: &mut Options, name: &str, value: &str) -> Result<()> {
         "--skip-bad-relationships" => opts.skip_bad_relationships = boolean()?,
         "--skip-bad-entries-logging" => opts.skip_bad_logging = boolean()?,
         "--overwrite-destination" => opts.overwrite = boolean()?,
+        "--vacuum" => opts.vacuum = boolean()?,
+        "--inline-edge-properties" => {
+            opts.inline_edge_properties = Some(parse_inline_edge_properties(value)?);
+        }
+        "--no-inline-edge-properties" => opts.inline_edge_properties = Some(Vec::new()),
         "--verbose" => opts.verbose = boolean()?,
         "--dry-run" | "--inspect" => opts.dry_run = boolean()?,
         "--strict" => {
@@ -367,6 +492,9 @@ fn apply_setting(opts: &mut Options, name: &str, value: &str) -> Result<()> {
 }
 
 pub(super) fn validate(opts: &Options) -> Result<()> {
+    if let Some(keys) = &opts.inline_edge_properties {
+        validate_inline_edge_properties(keys)?;
+    }
     if opts.destination.as_os_str().is_empty() {
         return Err(Error("a destination database file is required".into()));
     }

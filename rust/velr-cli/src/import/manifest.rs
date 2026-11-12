@@ -25,6 +25,8 @@ struct Manifest {
     read_buffer_size: Option<String>,
     path_pattern_style: Option<String>,
     normalize_types: Option<bool>,
+    vacuum: Option<bool>,
+    inline_edge_properties: Option<Vec<String>>,
     input_encoding: Option<String>,
     input_type: Option<String>,
     strict: Option<bool>,
@@ -98,10 +100,12 @@ fn from_text(text: &str, path: &Path) -> Result<Options> {
         read_buffer_size => "--read-buffer-size",
         path_pattern_style => "--path-pattern-style",
         normalize_types => "--normalize-types",
+        vacuum => "--vacuum",
         input_encoding => "--input-encoding",
         input_type => "--input-type",
         strict => "--strict",
     }
+    opts.inline_edge_properties = manifest.inline_edge_properties;
     let base = path.parent().unwrap_or_else(|| Path::new("."));
     for (index, node) in manifest.nodes.into_iter().enumerate() {
         let context = format!("nodes[{}]", index + 1);

@@ -8,6 +8,10 @@ from stdin, or open an interactive REPL for exploring a Velr database.
 Use `velr-admin` to create a database from local CSV files, then query and
 update it with `velr`.
 
+New and imported databases use schema version 11. To upgrade a database at
+schema versions 3 through 9, run `velr graph.db -e 'MIGRATE DATABASE'` before
+running graph queries.
+
 Install
 -------
 
@@ -302,12 +306,48 @@ In TOML manifests, use single-quoted strings for paths containing backslashes,
 for example `files = ['C:\data\people.csv']`, or use forward slashes. TOML
 double-quoted strings require each backslash to be escaped as `\\`.
 
+### Inline edge properties
+
+Imports select an inline edge property automatically by default. A property
+qualifies when it has values that fit inline on more than half of all imported
+relationships. Velr selects the property with the most qualifying values. If
+no property qualifies, the import leaves inline edge properties disabled.
+
+- Pass `--inline-edge-properties=timestamp` or set `inline_edge_properties = ["timestamp"]`
+  in the manifest to select the name explicitly, even if it is sparse or absent.
+- Pass `--no-inline-edge-properties` or set `inline_edge_properties = []` in
+  the manifest to disable the selection.
+
+Omit the manifest setting to use automatic selection. A CLI option replaces
+the manifest setting. The import report lists the selected property, if any.
+
+Choose a property for an empty database with `database create`.
+
+```sh
+velr-admin database create graph.db --inline-edge-properties=timestamp
+```
+
+Creating an empty database requires a new destination and leaves inline edge
+properties disabled unless you supply a name. Explicit selection accepts at
+most one nonempty, case-sensitive edge property name and applies it to all
+relationship types. The selection stays fixed when the database is reopened.
+Integers, floating-point numbers, and strings up to 128 UTF-8 bytes can be
+inlined. Values too large to inline still use ordinary Cypher reads and writes.
+Use CSV quotes inside the argument for a name that contains a comma, as in
+`--inline-edge-properties='"recorded,at"'`.
+
 ### Import completion and diagnostics
 
 The importer builds a temporary database beside the destination and publishes
 it after building indexes, collecting planner statistics, and validating
 database integrity and relationship references. These final steps can take
 time after all CSV rows have loaded.
+
+The importer skips the final vacuum by default. Pass `--vacuum` to reclaim
+unused database pages before publication, or set `vacuum = true` in an import
+manifest. Vacuuming takes extra time and temporary disk space. Both import
+forms accept `--vacuum=false` to override a manifest setting. `--dry-run`
+shows whether the final vacuum is enabled.
 
 A failed import leaves the destination intact and removes temporary database
 files. Existing destinations require
@@ -427,6 +467,35 @@ scripts:
 
 ```sh
 velr -f ndjson --stats -e 'MATCH (p:Person) RETURN p.name AS name'
+```
+
+Errors
+------
+
+In execute and stdin modes, query failures print diagnostics to stderr and exit
+with status `1`. The interactive shell prints the diagnostic and remains open.
+openCypher diagnostics include the error category, phase, and explanation.
+Source-aware diagnostics include the query excerpt, line and column, and an
+underline marking the error. Diagnostics use readable plain text without ANSI
+color codes. `--format` selects the result format; error diagnostics keep their
+text layout in every format. Where several expressions could explain an error,
+source labels mark possible locations.
+
+For example:
+
+```sh
+velr -e 'RETURN trim(42) AS name'
+```
+
+```text
+TypeError at runtime: InvalidArgumentType
+Error: trim() requires STRING or NULL; received INTEGER. Use toString() to convert a scalar value before trimming it.
+   ╭─[ :1:13 ]
+   │
+ 1 │ RETURN trim(42) AS name
+   │             ─┬
+   │              ╰── Review the argument to trim()
+───╯
 ```
 
 Explain

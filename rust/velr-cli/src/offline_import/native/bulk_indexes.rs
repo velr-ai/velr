@@ -131,9 +131,15 @@ impl NodeIndexes {
             mut text,
         } = self;
         let mut result = Vec::with_capacity(4);
+        let compact = cfg!(feature = "experimental-compact-default");
+        let node_spec = if compact {
+            spec(&[1, 0], &[1, 0], 1)
+        } else {
+            spec(&[1, 0], &[1, 0, 0], 2)
+        };
         let sorted = node
             .sort_with_page_size_and_workers(
-                &[spec(&[1, 0], &[1, 0, 0], 2)],
+                &[node_spec],
                 memory.min(32 * 1024 * 1024),
                 page_size,
                 1,
@@ -147,6 +153,10 @@ impl NodeIndexes {
             4,
         )?);
         super::index_builder::release_allocator_cache();
+        // WITHOUT ROWID secondaries already contain both property PK fields.
+        // SQLite adds no suffix to these records.
+        let property_fields: &[usize] = if compact { &[1, 0] } else { &[1, 0, 2] };
+        let numeric_fields: &[usize] = if compact { &[0, 1, 2] } else { &[0, 1, 2, 3] };
         // Independent node indexes share one fixed budget. Their sorting and
         // merging overlap relationship ingestion; additional run workers divide
         // their stream's allocation rather than multiply the memory pool.
@@ -161,7 +171,7 @@ impl NodeIndexes {
             // stream rather than exceeding the budget or rejecting small imports.
             let sorted = property
                 .sort_with_page_size_and_workers(
-                    &[spec(&[1, 0, 2], &[1, 0, 2], 2)],
+                    &[spec(property_fields, property_fields, 2)],
                     memory,
                     page_size,
                     1,
@@ -177,7 +187,7 @@ impl NodeIndexes {
             if let Some(mut numeric) = numeric {
                 let sorted = numeric
                     .sort_with_page_size_and_workers(
-                        &[spec(&[0, 1, 2, 3], &[0, 1, 2, 3], 3)],
+                        &[spec(numeric_fields, numeric_fields, 3)],
                         memory,
                         page_size,
                         1,
@@ -205,7 +215,7 @@ impl NodeIndexes {
             let property = scope.spawn(move || {
                 let sorted = property
                     .sort_with_page_size_and_workers(
-                        &[spec(&[1, 0, 2], &[1, 0, 2], 2)],
+                        &[spec(property_fields, property_fields, 2)],
                         property_memory,
                         page_size,
                         1,
@@ -217,7 +227,7 @@ impl NodeIndexes {
                 scope.spawn(move || {
                     let sorted = numeric
                         .sort_with_page_size_and_workers(
-                            &[spec(&[0, 1, 2, 3], &[0, 1, 2, 3], 3)],
+                            &[spec(numeric_fields, numeric_fields, 3)],
                             numeric_memory.unwrap(),
                             page_size,
                             1,
@@ -268,7 +278,7 @@ impl SecondaryIndexes {
                 node: IntegerSpool::create(parent, 2)?,
                 property: IntegerSpool::create(parent, 3)?,
                 numeric: Some(IntegerSpool::create(parent, 4)?),
-                text: TextSpool::create(parent)?,
+                text: TextSpool::create(parent, !cfg!(feature = "experimental-compact-default"))?,
             }),
             edge: IntegerSpool::create(parent, 4)?,
             node_job: None,
@@ -417,9 +427,15 @@ impl SecondaryIndexes {
 fn edge_specs() -> Vec<IntegerIndexSpec> {
     EDGE.iter()
         .map(|(_, fields)| {
-            let mut record = fields.to_vec();
-            record.push(3);
-            spec(fields, &record, 4)
+            // The compact key omits the explicit id column. The implicit rowid
+            // still supplies the same id and sorts parallel edges in id order.
+            if cfg!(feature = "experimental-compact-default") {
+                spec(fields, fields, 3)
+            } else {
+                let mut record = fields.to_vec();
+                record.push(3);
+                spec(fields, &record, 4)
+            }
         })
         .collect()
 }

@@ -86,6 +86,28 @@ fn assert_exit_ok(output: &std::process::Output, context: &str) {
     );
 }
 
+fn assert_query_error(output: &std::process::Output, header: &str) -> String {
+    let stderr = stderr_string(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        output.stdout.is_empty(),
+        "query failure leaked result output: {}",
+        stdout_string(&output.stdout)
+    );
+    assert_eq!(stderr.lines().next(), Some(header), "{stderr}");
+    assert!(!stderr.contains("Internal error:"), "{stderr}");
+    assert!(!stderr.contains("velr error (code "), "{stderr}");
+    assert!(
+        !stderr.contains('\u{1b}'),
+        "ANSI escape in diagnostic: {stderr}"
+    );
+    assert!(
+        stderr.lines().skip(1).any(|line| !line.trim().is_empty()),
+        "query failure has no explanation: {stderr}"
+    );
+    stderr
+}
+
 fn cypher_string_lit(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
     out.push('\'');
@@ -738,15 +760,135 @@ fn stats_go_to_stderr_only() {
 }
 
 #[test]
-fn syntax_error_goes_to_stderr_and_exits_one() {
+fn syntax_error_is_pretty_printed_without_driver_wrappers() {
     let output = velr()
         .args(["-e", "NOT A QUERY"])
         .output()
         .expect("syntax error query should run");
 
-    assert_eq!(output.status.code(), Some(1));
-    assert!(stdout_string(&output.stdout).is_empty());
-    assert!(stderr_string(&output.stderr).contains("Internal error:"));
+    let stderr = assert_query_error(&output, "SyntaxError at compile time: UnexpectedSyntax");
+    assert!(stderr.contains("NOT A QUERY"), "{stderr}");
+    assert!(stderr.contains(":1:1"), "{stderr}");
+    assert!(stderr.contains("╭─["), "{stderr}");
+    assert!(stderr.contains("╰"), "{stderr}");
+}
+
+#[test]
+fn semantic_error_preserves_unicode_source_in_every_output_format() {
+    let query = "MATCH (c:Café) RETURN client.name";
+    for format in ["plain", "styled", "tsv", "csv", "ndjson"] {
+        let output = velr()
+            .args(["-f", format, "-e", query])
+            .output()
+            .expect("undefined-variable query should run");
+
+        let stderr = assert_query_error(&output, "SyntaxError at compile time: UndefinedVariable");
+        assert!(stderr.contains(query), "{format}: {stderr}");
+        assert!(stderr.contains("╭─["), "{format}: {stderr}");
+        assert!(stderr.contains("╰"), "{format}: {stderr}");
+        assert!(stderr.contains("WITH"), "{format}: {stderr}");
+    }
+}
+
+#[test]
+fn runtime_type_error_preserves_type_and_corrective_hint() {
+    let output = velr()
+        .args(["-e", "RETURN trim(42) AS name"])
+        .output()
+        .expect("invalid trim query should run");
+
+    let stderr = assert_query_error(&output, "TypeError at runtime: InvalidArgumentType");
+    assert!(stderr.contains("INTEGER"), "{stderr}");
+    assert!(stderr.contains("toString()"), "{stderr}");
+    assert!(stderr.contains("RETURN trim(42) AS name"), "{stderr}");
+    assert!(stderr.contains("╭─["), "{stderr}");
+}
+
+#[test]
+fn math_errors_preserve_type_and_source_guidance() {
+    for query in [
+        "UNWIND [4, 'bad'] AS value RETURN sqrt(value) AS result",
+        "UNWIND [4, 'bad'] AS value RETURN floor(value) AS result",
+        "UNWIND [4, 'bad'] AS value RETURN round(value) AS result",
+        "RETURN round(3.14, 'bad') AS result",
+    ] {
+        let output = velr()
+            .args(["-e", query])
+            .output()
+            .expect("math query should run");
+        let stderr = assert_query_error(&output, "TypeError at runtime: InvalidArgumentType");
+        assert!(stderr.contains(query), "{stderr}");
+        assert!(stderr.contains("╭─["), "{stderr}");
+        assert!(stderr.contains("toFloat()"), "{stderr}");
+    }
+}
+
+#[test]
+fn missing_parameter_error_preserves_parameter_name() {
+    let output = velr()
+        .args(["-e", "RETURN $customerId AS id"])
+        .output()
+        .expect("missing-parameter query should run");
+
+    let stderr = assert_query_error(&output, "ParameterMissing at runtime: MissingParameter");
+    assert!(stderr.contains("$customerId"), "{stderr}");
+    assert!(stderr.contains("RETURN $customerId AS id"), "{stderr}");
+    assert!(stderr.contains("╭─["), "{stderr}");
+}
+
+#[test]
+fn row_failure_keeps_diagnostic_and_discards_partial_results_in_every_format() {
+    // The first row can be trimmed; the second fails while consuming the result.
+    let query = "UNWIND [' Ada ', 42] AS value RETURN trim(value) AS name";
+    for format in ["plain", "styled", "tsv", "csv", "ndjson"] {
+        let output = velr()
+            .args(["-f", format, "-e", query])
+            .output()
+            .expect("deferred trim failure should run");
+
+        let stderr = assert_query_error(&output, "TypeError at runtime: InvalidArgumentType");
+        assert!(stderr.contains("INTEGER"), "{format}: {stderr}");
+        assert!(stderr.contains("toString()"), "{format}: {stderr}");
+        assert!(stderr.contains(query), "{format}: {stderr}");
+        assert!(stderr.contains("╭─["), "{format}: {stderr}");
+    }
+}
+
+#[test]
+fn stdin_query_error_preserves_diagnostic() {
+    let mut child = velr()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stdin query should spawn");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin pipe should exist")
+        .write_all(b"RETURN missing;\n")
+        .expect("query should write to stdin");
+    drop(child.stdin.take());
+    let output = child
+        .wait_with_output()
+        .expect("stdin query should produce output");
+
+    let stderr = assert_query_error(&output, "SyntaxError at compile time: UndefinedVariable");
+    assert!(stderr.contains("RETURN missing"), "{stderr}");
+    assert!(stderr.contains("╭─["), "{stderr}");
+}
+
+#[test]
+fn explain_error_preserves_diagnostic() {
+    let output = velr()
+        .args(["--explain", "RETURN missing"])
+        .output()
+        .expect("invalid explain query should run");
+
+    let stderr = assert_query_error(&output, "SyntaxError at compile time: UndefinedVariable");
+    assert!(stderr.contains("EXPLAIN RETURN missing"), "{stderr}");
+    assert!(stderr.contains("╭─["), "{stderr}");
 }
 
 #[test]

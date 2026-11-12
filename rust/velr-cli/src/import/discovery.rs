@@ -302,6 +302,11 @@ pub(super) fn print_plan(
         opts.buffer_bytes,
         opts.report.display()
     );
+    println!("Final VACUUM: {}", opts.vacuum);
+    match &opts.inline_edge_properties {
+        None => println!("Inline edge properties: automatic"),
+        Some(keys) => println!("Inline edge properties: {keys:?}"),
+    }
     for (index, source) in sources.iter().enumerate() {
         if let Some(node) = &source.header.node {
             println!("Nodes [{}]", index + 1);

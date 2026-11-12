@@ -23,10 +23,11 @@ pub(crate) struct TextSpool {
     minimum: [u64; 3],
     maximum: [u64; 3],
     prefix_bytes: usize,
+    record_fields: usize,
 }
 
 impl TextSpool {
-    pub(crate) fn create(parent: &Path) -> io::Result<Self> {
+    pub(crate) fn create(parent: &Path, rowid_suffix: bool) -> io::Result<Self> {
         let directory = loop {
             let candidate = parent.join(format!(
                 ".velr-text-index-{}-{}",
@@ -49,6 +50,7 @@ impl TextSpool {
             minimum: [u64::MAX; 3],
             maximum: [0; 3],
             prefix_bytes: 0,
+            record_fields: 3 + usize::from(rowid_suffix),
         })
     }
 
@@ -219,8 +221,9 @@ impl TextSpool {
             generation += 1;
         }
         let path = self.directory.0.join("sorted");
-        let mut statistics =
-            IndexStatistics::new(4, 3, self.rows).map_err(|message| invalid(&message))?;
+        let record_fields = self.record_fields;
+        let mut statistics = IndexStatistics::new(record_fields, 3, self.rows)
+            .map_err(|message| invalid(&message))?;
         let mut previous: Option<TextKey<N>> = None;
         let mut output = BufWriter::with_capacity(MIB, File::create(&path)?);
         let mut plan = page_size
@@ -233,12 +236,13 @@ impl TextSpool {
                 None => 0,
                 Some(last) => codec
                     .first_changed(&last, &key)
+                    .filter(|&changed| changed < record_fields)
                     .ok_or_else(|| invalid("text index contains duplicate complete keys"))?,
             };
             statistics
                 .push(changed, offset)
                 .map_err(|message| invalid(&message))?;
-            codec.encode(&key, &mut record)?;
+            codec.encode(&key, record_fields, &mut record)?;
             if let Some(plan) = &mut plan {
                 plan.push(record.len())?;
             }
@@ -385,7 +389,12 @@ impl TextCodec {
             .into_iter()
             .position(|range| last.0[range.clone()] != key.0[range])
     }
-    fn encode<const N: usize>(&self, key: &TextKey<N>, record: &mut Vec<u8>) -> io::Result<()> {
+    fn encode<const N: usize>(
+        &self,
+        key: &TextKey<N>,
+        record_fields: usize,
+        record: &mut Vec<u8>,
+    ) -> io::Result<()> {
         let ranges = self.ranges::<N>();
         let integer = |column: usize, field: usize| {
             let value = key.0[ranges[column].clone()]
@@ -400,15 +409,13 @@ impl TextCodec {
             .unwrap_or(prefix.len());
         let text = std::str::from_utf8(&prefix[..end])
             .map_err(|_| invalid("sorted text prefix is not UTF-8"))?;
-        encode_record(
-            &[
-                StorageValueRef::Integer(integer(0, 0)),
-                StorageValueRef::Text(text),
-                StorageValueRef::Integer(integer(2, 1)),
-                StorageValueRef::Integer(integer(3, 2)),
-            ],
-            record,
-        );
+        let values = [
+            StorageValueRef::Integer(integer(0, 0)),
+            StorageValueRef::Text(text),
+            StorageValueRef::Integer(integer(2, 1)),
+            StorageValueRef::Integer(integer(3, 2)),
+        ];
+        encode_record(&values[..record_fields], record);
         Ok(())
     }
 }
@@ -638,7 +645,7 @@ mod tests {
                     (rowid, node, key, texts[rowid as usize % texts.len()])
                 })
                 .collect::<Vec<_>>();
-            let mut spool = TextSpool::create(&directory.0).unwrap();
+            let mut spool = TextSpool::create(&directory.0, true).unwrap();
             for workers in [0, 5] {
                 assert!(spool
                     .sort_with_page_size_and_workers(8 * MIB, 4096, workers)

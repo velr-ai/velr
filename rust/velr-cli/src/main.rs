@@ -113,14 +113,15 @@ enum ReplAction {
 #[derive(Debug)]
 enum CliError {
     IOError(String),
-    Internal(String),
+    Database(velr::Error),
 }
 
 impl fmt::Display for CliError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             CliError::IOError(message) => write!(f, "I/O error: {message}"),
-            CliError::Internal(message) => write!(f, "Internal error: {message}"),
+            CliError::Database(error) if !error.message.is_empty() => f.write_str(&error.message),
+            CliError::Database(error) => write!(f, "{error}"),
         }
     }
 }
@@ -218,7 +219,7 @@ fn run(config: Config) -> i32 {
             let velr = match Velr::open(config.db_path.as_deref()) {
                 Ok(velr) => velr,
                 Err(err) => {
-                    eprintln!("Failed to open database: {err}");
+                    eprintln!("Failed to open database: {}", to_err(err));
                     return EXIT_RUNTIME;
                 }
             };
@@ -955,8 +956,8 @@ fn skip_escaped_identifier(query: &str, start: usize) -> usize {
     index
 }
 
-fn to_err<E: ToString>(err: E) -> CliError {
-    CliError::Internal(err.to_string())
+fn to_err(err: velr::Error) -> CliError {
+    CliError::Database(err)
 }
 
 #[cfg(test)]

@@ -46,6 +46,41 @@ pub fn run(args: Vec<String>) -> Result<()> {
     execute(opts)
 }
 
+pub fn create_database(args: Vec<String>) -> Result<()> {
+    let Some((destination, keys)) = options::parse_create(args)? else {
+        print!("{}", options::HELP);
+        return Ok(());
+    };
+    let destination = absolute(&destination)?;
+    #[cfg(feature = "experimental-compact-default")]
+    velr_storage::compact::create_compact_database(Some(&destination), &keys)
+        .map_err(|error| Error(error.to_string()))?
+        .close()
+        .map_err(|(_, error)| Error(error.to_string()))?;
+    #[cfg(not(feature = "experimental-compact-default"))]
+    {
+        let stage = Stage::create(&destination)?;
+        let stage_file = stage.0.join("created.db");
+        velr_storage::open_fresh_database(
+            stage_file
+                .to_str()
+                .ok_or_else(|| Error("staging path must be UTF-8".into()))?,
+        )
+        .map_err(|error| Error(error.to_string()))?
+        .close()
+        .map_err(|(_, error)| Error(error.to_string()))?;
+        velr_cli::offline_import::publish_import(&stage_file, &destination, false)?;
+    }
+    if let Err(error) = writeln!(
+        std::io::stdout().lock(),
+        "Created {}\nInline edge properties: {keys:?}",
+        destination.display(),
+    ) {
+        eprintln!("Database created; unable to write the summary: {error}");
+    }
+    Ok(())
+}
+
 struct PreparedSource {
     files: Vec<PathBuf>,
     header: Header,
@@ -62,6 +97,28 @@ struct Batch {
     diagnostics: Vec<String>,
 }
 struct Stage(PathBuf);
+impl Stage {
+    fn create(destination: &Path) -> Result<Self> {
+        let parent = destination
+            .parent()
+            .ok_or_else(|| Error("destination has no parent directory".into()))?;
+        let name = destination
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| Error("destination path must have a UTF-8 file name".into()))?;
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| Error(error.to_string()))?
+            .as_nanos();
+        let path = parent.join(format!(
+            ".{name}.velr-import-{}-{stamp}",
+            std::process::id()
+        ));
+        fs::create_dir(&path)
+            .map_err(|error| Error(format!("create import staging directory: {error}")))?;
+        Ok(Self(path))
+    }
+}
 impl Drop for Stage {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -103,19 +160,7 @@ fn execute(mut opts: Options) -> Result<()> {
         .open(&opts.report)
         .map_err(|e| Error(format!("report {}: {e}", opts.report.display())))?;
     let mut report = BufWriter::new(report_file);
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|e| Error(e.to_string()))?
-        .as_nanos();
-    let name = absolute_destination
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| Error("destination path must be UTF-8".into()))?;
-    let stage = Stage(parent.join(format!(
-        ".{name}.velr-import-{}-{stamp}",
-        std::process::id()
-    )));
-    fs::create_dir(&stage.0).map_err(|e| Error(format!("create import staging directory: {e}")))?;
+    let stage = Stage::create(&absolute_destination)?;
     let stage_file = stage.0.join("imported.db");
     let mut importer = OfflineImport::create(
         stage_file
@@ -246,7 +291,8 @@ fn execute(mut opts: Options) -> Result<()> {
         );
     }
     eprintln!("Finalizing indexes and graph metadata");
-    let summary = importer.finish()?;
+    let (summary, mapping) =
+        importer.finish_with_options(opts.vacuum, opts.inline_edge_properties.as_deref())?;
     let elapsed = started.elapsed();
     let counts = summary.counts;
     writeln!(
@@ -259,6 +305,8 @@ fn execute(mut opts: Options) -> Result<()> {
         elapsed.as_secs_f64()
     )
     .map_err(|e| Error(e.to_string()))?;
+    writeln!(report, "Inline edge properties: {mapping:?}")
+        .map_err(|error| Error(error.to_string()))?;
     report.flush().map_err(|e| Error(e.to_string()))?;
     if let Err(error) =
         velr_cli::offline_import::publish_import(&stage_file, &absolute_destination, opts.overwrite)

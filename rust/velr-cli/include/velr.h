@@ -62,19 +62,48 @@ typedef struct velr_migration_report {
   char*                  steps;        /* comma-separated UTF-8; free with velr_migration_report_clear() */
 } velr_migration_report;
 
-/* Free error strings returned via out_err. */
+/* Free an error string returned via out_err or a string whose API specifies this deallocator. */
 void velr_string_free(char* s);
 
 /* ---------- Velr (connection) ---------- */
 
-/* Open a connection, creating/initializing a file-backed DB when needed. */
+/*
+ * Open a connection, creating a schema 11 database when needed in a default build.
+ * Use velr_migrate on a writable connection before querying an older database.
+ */
 velr_code velr_open (const char* path_or_null, velr_db** out_db, char** out_err);
+
+/*
+ * Create a new database. A NULL path or ":memory:" creates an in-memory database.
+ * Any other path must not exist. Strings must be NUL-terminated UTF-8.
+ * Supply zero or one case-sensitive, nonempty relationship property name. The
+ * array and name are borrowed for this call. Count zero permits a NULL array.
+ * The selection is fixed at creation and applies across relationship types.
+ * Eligible values include integers, floating-point numbers, and strings up to
+ * 128 UTF-8 bytes. All values use the same Cypher reads and writes.
+ * Close the returned handle with velr_close().
+ */
+velr_code velr_create(
+    const char* path_or_null,
+    const char* const* inline_edge_properties,
+    size_t inline_edge_properties_count,
+    velr_db** out_db,
+    char** out_err
+);
+
+/*
+ * Read the inline relationship property names in configured order. The
+ * selection remains available after reopening the database.
+ * On success, out_json receives a NUL-terminated UTF-8 JSON array of strings.
+ * An empty configuration returns "[]". Release the string with velr_string_free().
+ */
+velr_code velr_inline_edge_properties_json(velr_db* db, char** out_json, char** out_err);
 
 /*
  * Open an existing file-backed DB read-only.
  * Does not create files, initialize schema, repair, or migrate.
- * Supported older schema versions may be opened for reads, but writes and
- * schema-version-5-only features require explicit migration.
+ * In default builds, migrate older databases on a writable connection and
+ * reopen the read-only connection before running graph queries.
  */
 velr_code velr_open_existing_readonly(const char* path, velr_db** out_db, char** out_err);
 void      velr_close(velr_db* db);

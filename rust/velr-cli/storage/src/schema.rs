@@ -3,16 +3,8 @@
 pub const CURRENT_SCHEMA_VERSION: i32 = 9;
 pub const MIN_SUPPORTED_SCHEMA_VERSION: i32 = 3;
 
-pub const PG_SCHEMA: &str = r#"
--- Nodes
-PRAGMA journal_mode = WAL;
-PRAGMA foreign_keys = ON;
-PRAGMA synchronous = NORMAL;
-PRAGMA wal_autocheckpoint = 1000;
-PRAGMA page_size = 4096;
-PRAGMA temp_store = MEMORY;
-PRAGMA case_sensitive_like = ON;
-
+macro_rules! schema_ddl {
+    () => { r#"
 CREATE TABLE IF NOT EXISTS key_dict(
   id   INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE
@@ -674,7 +666,26 @@ CREATE TABLE IF NOT EXISTS velr_vector_embedding_row_cache (
 -- End vector schema.
 PRAGMA user_version = 9;
 
-"#;
+"# };
+}
+
+/// Native schema statements for an empty database on an already configured connection.
+/// May run inside a caller-owned transaction.
+pub const PG_SCHEMA_DDL: &str = schema_ddl!();
+
+pub const PG_SCHEMA: &str = concat!(
+    r#"
+-- Nodes
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+PRAGMA synchronous = NORMAL;
+PRAGMA wal_autocheckpoint = 1000;
+PRAGMA page_size = 4096;
+PRAGMA temp_store = MEMORY;
+PRAGMA case_sensitive_like = ON;
+"#,
+    schema_ddl!()
+);
 
 pub const GRAPH_SHAPE_TRIGGER_DROP_SQL: &str = r#"
 DROP TRIGGER IF EXISTS graph_shape_edge_property_update;
