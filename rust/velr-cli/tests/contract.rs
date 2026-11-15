@@ -791,6 +791,77 @@ fn semantic_error_preserves_unicode_source_in_every_output_format() {
 }
 
 #[test]
+fn invalid_predicates_and_function_calls_report_compile_time_diagnostics() {
+    for (query, detail, explanation, label) in [
+        (
+            "WITH 2 AS value WHERE value RETURN value",
+            "InvalidArgumentType",
+            "WHERE requires a Boolean condition",
+            "Used directly as the filter condition",
+        ),
+        (
+            "RETURN toUpperr('Ada')",
+            "UnknownFunction",
+            "Unknown function 'toUpperr'",
+            "Function name",
+        ),
+        (
+            "RETURN substring('Ada')",
+            "InvalidArgumentCount",
+            "substring(text, start [, length]) takes 2 or 3 arguments",
+            "Function call",
+        ),
+    ] {
+        let output = velr()
+            .args(["-f", "ndjson", "-e", query])
+            .output()
+            .expect("invalid query should run");
+        let header = format!("SyntaxError at compile time: {detail}");
+        let stderr = assert_query_error(&output, &header);
+        assert_eq!(stderr.matches(explanation).count(), 1, "{stderr}");
+        assert!(stderr.contains(query), "{stderr}");
+        assert!(
+            stderr
+                .lines()
+                .any(|line| line.contains('╰') && line.ends_with(label)),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("read compiler"), "{stderr}");
+        assert!(!stderr.contains("ValueE("), "{stderr}");
+    }
+}
+
+#[test]
+fn unknown_procedure_error_highlights_its_qualified_name() {
+    let query = "CALL db.noSuchProcedure()";
+    let output = velr()
+        .args(["-f", "ndjson", "-e", query])
+        .output()
+        .expect("unknown procedure query should run");
+    let stderr = assert_query_error(
+        &output,
+        "ProcedureNotFound at compile time: UnknownProcedure",
+    );
+    assert!(
+        stderr.contains("No procedure named 'db.noSuchProcedure' is registered"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stderr.matches("Check the spelling or register").count(),
+        1,
+        "{stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line.contains('╰') && line.ends_with("Procedure name")),
+        "{stderr}"
+    );
+    assert!(stderr.contains(query), "{stderr}");
+    assert!(stderr.contains(":1:6"), "{stderr}");
+}
+
+#[test]
 fn runtime_type_error_preserves_type_and_corrective_hint() {
     let output = velr()
         .args(["-e", "RETURN trim(42) AS name"])
@@ -802,6 +873,33 @@ fn runtime_type_error_preserves_type_and_corrective_hint() {
     assert!(stderr.contains("toString()"), "{stderr}");
     assert!(stderr.contains("RETURN trim(42) AS name"), "{stderr}");
     assert!(stderr.contains("╭─["), "{stderr}");
+}
+
+#[test]
+fn runtime_where_type_error_highlights_the_condition_and_hides_partial_rows() {
+    let db = seeded_graph_db();
+    for query in [
+        "MATCH (m:Movie) WHERE m.released RETURN m.title",
+        "UNWIND [true, 1] AS value WITH value WHERE value RETURN value",
+    ] {
+        let output = velr()
+            .args([db.path_str(), "-f", "ndjson", "-e", query])
+            .output()
+            .expect("query with an invalid runtime condition should run");
+        let stderr = assert_query_error(&output, "TypeError at runtime: InvalidArgumentType");
+        assert!(
+            stderr.contains("WHERE requires a Boolean condition"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("returned INTEGER"), "{stderr}");
+        assert!(stderr.contains("amount <> 0"), "{stderr}");
+        assert!(stderr.contains(query), "{stderr}");
+        assert!(
+            stderr.lines().any(|line| line.contains('╰')
+                && line.ends_with("Used directly as the filter condition")),
+            "{stderr}"
+        );
+    }
 }
 
 #[test]

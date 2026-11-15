@@ -13,6 +13,35 @@ pub use schema::{
     CURRENT_SCHEMA_VERSION, GRAPH_SHAPE_BACKFILL, GRAPH_SHAPE_TRIGGER_DROP_SQL, PG_SCHEMA,
 };
 
+/// Size SQLite's per-connection lookaside allocator for Velr queries.
+///
+/// Call immediately after opening the connection. A handle with existing
+/// lookaside allocations keeps its current allocator.
+/// Returns an error if SQLite rejects the configuration for another reason.
+pub fn configure_query_lookaside(conn: &Connection) -> rusqlite::Result<()> {
+    use rusqlite::ffi;
+
+    // The registered Cypher functions hold small slots for the connection's
+    // lifetime. Leave room for short-lived allocations during query execution.
+    const SLOT_BYTES: std::ffi::c_int = 1_200;
+    const SLOT_COUNT: std::ffi::c_int = 56;
+    // SAFETY: SQLite owns the buffer requested by the null pointer. The
+    // connection remains alive and sqlite3_db_config acquires its mutex.
+    let code = unsafe {
+        ffi::sqlite3_db_config(
+            conn.handle(),
+            ffi::SQLITE_DBCONFIG_LOOKASIDE,
+            std::ptr::null_mut::<std::ffi::c_void>(),
+            SLOT_BYTES,
+            SLOT_COUNT,
+        )
+    };
+    match code {
+        ffi::SQLITE_OK | ffi::SQLITE_BUSY => Ok(()),
+        code => Err(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None)),
+    }
+}
+
 pub fn configure_connection(conn: &Connection) -> rusqlite::Result<()> {
     conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // A modest, fixed cache target keeps ordinary indexed multi-entity writes
@@ -74,4 +103,49 @@ pub fn open_in_memory_database() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
     initialize_fresh_database(&conn)?;
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::ffi;
+
+    #[test]
+    fn query_lookaside_leaves_room_for_more_prepared_statements() -> rusqlite::Result<()> {
+        fn lookaside_used(conn: &Connection) -> i32 {
+            let mut current = 0;
+            let mut peak = 0;
+            // SAFETY: The handle and both counter outputs are valid for this call.
+            let code = unsafe {
+                ffi::sqlite3_db_status(
+                    conn.handle(),
+                    ffi::SQLITE_DBSTATUS_LOOKASIDE_USED,
+                    &mut current,
+                    &mut peak,
+                    0,
+                )
+            };
+            assert_eq!(code, ffi::SQLITE_OK);
+            current
+        }
+
+        fn prepare_many(conn: &Connection) -> rusqlite::Result<Vec<rusqlite::Statement<'_>>> {
+            (0..128).map(|_| conn.prepare("SELECT 1")).collect()
+        }
+
+        let default = Connection::open_in_memory()?;
+        let configured = Connection::open_in_memory()?;
+        configure_query_lookaside(&configured)?;
+        let _default_statements = prepare_many(&default)?;
+        let mut configured_statements = prepare_many(&configured)?;
+        let slots_in_use = lookaside_used(&configured);
+        assert!(slots_in_use > lookaside_used(&default));
+
+        // Keep an allocator with outstanding allocations and its statements usable.
+        configure_query_lookaside(&configured)?;
+        assert_eq!(lookaside_used(&configured), slots_in_use);
+        let result: i32 = configured_statements[0].query_row([], |row| row.get(0))?;
+        assert_eq!(result, 1);
+        Ok(())
+    }
 }

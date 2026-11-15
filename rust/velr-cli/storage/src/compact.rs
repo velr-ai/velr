@@ -159,6 +159,7 @@ pub fn create_compact_database(path: Option<&Path>, keys: &[String]) -> Result<C
     let key = validate_inline_edge_properties(keys)?;
     let Some(path) = path else {
         let conn = Connection::open_in_memory()?;
+        crate::configure_query_lookaside(&conn)?;
         initialize_compact_database(&conn, key)?;
         return Ok(conn);
     };
@@ -230,6 +231,7 @@ pub fn create_compact_database(path: Option<&Path>, keys: &[String]) -> Result<C
         ))
     })?;
     let conn = Connection::open_with_flags(&path, flags)?;
+    crate::configure_query_lookaside(&conn)?;
     crate::configure_connection(&conn)?;
     crate::configure_wal_retention(&conn)?;
     conn.pragma_update(None, "synchronous", "FULL")?;

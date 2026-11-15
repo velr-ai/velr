@@ -60,12 +60,15 @@ fn fingerprint_with_server_tables(
     let mut q=c.prepare("SELECT type,name,tbl_name,coalesce(sql,'') FROM main.sqlite_schema WHERE name NOT LIKE 'sqlite_stat%' ORDER BY type,name")?;
     let mut rows = q.query([])?;
     while let Some(r) = rows.next()? {
+        let columns = [
+            r.get_ref(0)?.as_str()?,
+            r.get_ref(1)?.as_str()?,
+            r.get_ref(2)?.as_str()?,
+            r.get_ref(3)?.as_str()?,
+        ];
         #[cfg(feature = "experimental-compact-default")]
         if version == i64::from(crate::compact::SCHEMA_VERSION) {
-            let kind: &str = r.get_ref(0)?.as_str()?;
-            let name: &str = r.get_ref(1)?.as_str()?;
-            let owner: &str = r.get_ref(2)?.as_str()?;
-            let sql: &str = r.get_ref(3)?.as_str()?;
+            let [kind, name, owner, sql] = columns;
             // Raft installs its own state after graph admission. Exclude
             // only the named tables and their implicit SQLite indexes.
             if ((kind == "table" && name == owner)
@@ -78,10 +81,9 @@ fn fingerprint_with_server_tables(
                 continue;
             }
         }
-        for i in 0..4 {
-            let s: String = r.get(i)?;
-            h.update((s.len() as u64).to_le_bytes());
-            h.update(s.as_bytes());
+        for column in columns {
+            h.update((column.len() as u64).to_le_bytes());
+            h.update(column.as_bytes());
         }
     }
     Ok(h.finalize().to_vec())
